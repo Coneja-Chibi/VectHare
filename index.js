@@ -20,7 +20,7 @@ import qdrantBackend from './qdrant-backend.js';
 import milvusBackend from './milvus-backend.js';
 
 const pluginName = 'similharity';
-const pluginVersion = '3.0.0';
+const pluginVersion = '3.1.0';
 
 /**
  * Initialize the plugin

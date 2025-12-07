@@ -466,9 +466,13 @@ export async function synchronizeChat(settings, batchSize = 5) {
 
                     // Register on first successful insert (prevents ghost collections)
                     if (!isRegistered) {
-                        registerCollection(collectionId);
+                        // Construct proper registry key: backend:source:collectionId
+                        const backend = settings.vector_backend || 'standard';
+                        const source = settings.source || 'transformers';
+                        const registryKey = `${backend}:${source}:${collectionId}`;
+                        registerCollection(registryKey);
                         isRegistered = true;
-                        console.log(`VectHare: Registered collection ${collectionId} after first successful insert`);
+                        console.log(`VectHare: Registered collection ${registryKey} after first successful insert`);
                     }
                 }
             } catch (itemError) {

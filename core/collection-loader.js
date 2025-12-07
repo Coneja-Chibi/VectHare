@@ -307,6 +307,8 @@ let pluginCollectionData = null;
  */
 async function discoverViaPlugin(settings) {
     try {
+        console.debug('🔍 VectHare: Requesting collection discovery from plugin...');
+
         // Plugin now scans ALL sources, not just the current one
         const response = await fetch(`/api/plugins/similharity/collections`, {
             method: 'GET',
@@ -314,14 +316,22 @@ async function discoverViaPlugin(settings) {
         });
 
         if (!response.ok) {
-            console.warn('VectHare: Plugin collections endpoint failed');
+            console.warn(`⚠️ VectHare: Plugin collections endpoint failed (status: ${response.status})`);
+            console.log('   💡 Make sure the Similharity plugin is installed and running');
             return [];
         }
 
         const data = await response.json();
 
         if (data.success && Array.isArray(data.collections)) {
-            console.log(`VectHare: Plugin found ${data.collections.length} collections across all sources`);
+            console.log(`✅ VectHare: Plugin found ${data.collections.length} collections across all sources`);
+
+            // Log the sources found
+            const sourcesSummary = {};
+            data.collections.forEach(c => {
+                sourcesSummary[c.source] = (sourcesSummary[c.source] || 0) + 1;
+            });
+            console.debug('   Sources:', Object.entries(sourcesSummary).map(([s, count]) => `${s}: ${count}`).join(', '));
 
             // Cache the plugin data (includes chunk counts, sources, AND backends)
             // Key format: "source:collectionId" to handle same collection ID across different sources
@@ -329,6 +339,8 @@ async function discoverViaPlugin(settings) {
             const uniqueKeys = [];
 
             for (const collection of data.collections) {
+                console.debug(`   - ${collection.source}:${collection.id} (${collection.chunkCount} chunks, backend: ${collection.backend || 'standard'})`);
+
                 const collectionData = {
                     chunkCount: collection.chunkCount,
                     source: collection.source,
@@ -347,8 +359,6 @@ async function discoverViaPlugin(settings) {
                 if (sanitized !== collection.id) {
                     pluginCollectionData[`${collection.source}:${sanitized}`] = collectionData;
                 }
-
-                console.log(`VectHare:   - ${collection.id} (${collection.backend}, ${collection.source}, ${collection.chunkCount} chunks)`);
             }
 
             // IMPORTANT: Replace registry with what plugin found (removes stale entries)
@@ -356,19 +366,44 @@ async function discoverViaPlugin(settings) {
             const currentRegistry = getCollectionRegistry();
             const pluginKeySet = new Set(uniqueKeys);
 
+            console.debug(`\n📋 VectHare: Updating registry...`);
+            console.debug(`   Current registry has ${currentRegistry.length} entries`);
+            console.debug(`   Plugin discovered ${uniqueKeys.length} collections`);
+
             // Remove entries that no longer exist on disk
             const staleEntries = currentRegistry.filter(key => !pluginKeySet.has(key));
             if (staleEntries.length > 0) {
-                console.log(`VectHare: Removing ${staleEntries.length} stale registry entries not found on disk`);
+                console.debug(`   🗑️  Removing ${staleEntries.length} stale registry entries:`);
                 for (const staleKey of staleEntries) {
+                    console.debug(`      - ${staleKey}`);
                     unregisterCollection(staleKey);
                 }
             }
 
             // Register all discovered collections with source:id format
+            let newRegistrations = 0;
+            let duplicateKeySkips = 0;
             for (const key of uniqueKeys) {
+                if (!currentRegistry.includes(key)) {
+                    newRegistrations++;
+                    console.debug(`   ➕ Registering: ${key}`);
+                } else {
+                    duplicateKeySkips++;
+                    console.debug(`   ⏭️  Already registered: ${key}`);
+                }
                 registerCollection(key);
             }
+            
+            if (duplicateKeySkips > 0) {
+                console.warn(`   ⚠️  ${duplicateKeySkips} collection(s) had duplicate registry keys (same source:id in multiple backends)`);
+                console.warn(`   💡 Registry key format "source:id" doesn't distinguish backends - only one backend per source:id can be registered`);
+            }
+
+            if (newRegistrations > 0) {
+                console.log(`   ✅ Registered ${newRegistrations} new collections`);
+            }
+
+            console.log(`   Final registry size: ${getCollectionRegistry().length}\n`);
 
             return uniqueKeys;
         }
@@ -631,6 +666,8 @@ export async function doesChatHaveVectors(settings, overrideChatId, overrideUUID
  * @returns {Promise<object[]>} Array of collection objects
  */
 export async function loadAllCollections(settings, autoDiscover = true) {
+    console.debug('🐰 VectHare: Loading all collections for Database Browser...');
+
     // Clean up registry first (remove nulls and duplicates)
     cleanupCollectionRegistry();
 
@@ -640,6 +677,8 @@ export async function loadAllCollections(settings, autoDiscover = true) {
     }
 
     const registry = getCollectionRegistry();
+    console.debug(`VectHare: Registry contains ${registry.length} collection(s):`, registry);
+
     const collections = [];
     const hasPlugin = pluginAvailable === true;
 
@@ -728,7 +767,9 @@ export async function loadAllCollections(settings, autoDiscover = true) {
 
             // Skip empty collections (no point showing them)
             if (chunkCount === 0) {
-                console.log(`VectHare:   Skipping empty collection ${collectionId}`);
+                console.debug(`⚠️ VectHare: Skipping empty collection "${collectionId}" (0 chunks)`);
+                console.debug(`   💡 This collection exists but has no vectorized data`);
+                console.debug(`   💡 To see it in Database Browser, you need to vectorize some content first`);
                 continue;
             }
 
@@ -763,7 +804,16 @@ export async function loadAllCollections(settings, autoDiscover = true) {
         }
     }
 
-    console.log(`VectHare: Loaded ${collections.length} collections`);
+    console.log(`\n✅ VectHare: Loaded ${collections.length} non-empty collections for Database Browser`);
+    if (collections.length === 0 && registry.length > 0) {
+        console.debug(`⚠️ VectHare: ${registry.length} collections in registry but all are empty!`);
+        console.debug(`   💡 Collections need to have vectorized chunks to appear in Database Browser`);
+        console.debug(`   💡 Try vectorizing your chat or content first`);
+    } else if (collections.length === 0 && registry.length === 0) {
+        console.debug(`ℹ️ VectHare: No collections registered yet`);
+        console.debug(`   💡 Collections are created when you vectorize chat messages or documents`);
+    }
+
     return collections;
 }
 

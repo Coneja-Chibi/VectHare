@@ -116,31 +116,54 @@ export class MilvusBackend extends VectorBackend {
 
     /**
      * Parse collection ID to extract type and sourceId for multitenancy
+     * Handles registry key format: backend:source:collectionId
+     * Extracts just the collectionId part and parses it
+     * 
      * New format: vh:{type}:{uuid}
      * Examples:
      *   "vh:chat:a1b2c3d4-e5f6-7890-abcd-ef1234567890" → {type: "chat", sourceId: "a1b2..."}
      *   "vh:lorebook:world_info_123" → {type: "lorebook", sourceId: "world_info_123"}
      *   "vh:doc:char_456" → {type: "doc", sourceId: "char_456"}
+     * 
+     * Legacy format: vecthare_{type}_{sourceId}
      */
     _parseCollectionId(collectionId) {
         if (!collectionId || typeof collectionId !== 'string') {
             return { type: 'unknown', sourceId: 'unknown' };
         }
 
+        // Strip registry key prefix if present (backend:source:collectionId)
+        const knownBackends = ['standard', 'lancedb', 'vectra', 'milvus', 'qdrant'];
+        const knownSources = ['transformers', 'openai', 'cohere', 'ollama', 'llamacpp',
+            'vllm', 'koboldcpp', 'webllm', 'bananabread', 'openrouter'];
+        
         const parts = collectionId.split(':');
+        
+        // Check if it starts with backend:source: prefix
+        if (parts.length >= 3 && knownBackends.includes(parts[0]) && knownSources.includes(parts[1])) {
+            // Strip the backend:source: prefix and work with just the collection ID
+            collectionId = parts.slice(2).join(':');
+        }
+        // Check if it starts with source: prefix (old format)
+        else if (parts.length >= 2 && knownSources.includes(parts[0])) {
+            // Strip the source: prefix
+            collectionId = parts.slice(1).join(':');
+        }
+
+        // Now parse the actual collection ID
+        const idParts = collectionId.split(':');
 
         // New format: vh:{type}:{sourceId}
-        if (parts.length >= 3 && parts[0] === 'vh') {
+        if (idParts.length >= 3 && idParts[0] === 'vh') {
             return {
-                type: parts[1],
-                sourceId: parts.slice(2).join(':') // Handle UUIDs that might have colons
+                type: idParts[1],
+                sourceId: idParts.slice(2).join(':') // Handle UUIDs that might have colons
             };
         }
 
         // Legacy format: vecthare_{type}_{sourceId}
         const legacyParts = collectionId.split('_');
         if (legacyParts.length >= 3 && legacyParts[0] === 'vecthare') {
-            console.warn('VectHare: Legacy collection ID format detected:', collectionId);
             return {
                 type: legacyParts[1],
                 sourceId: legacyParts.slice(2).join('_')

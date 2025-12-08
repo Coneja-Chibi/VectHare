@@ -209,7 +209,7 @@ export function extractTextKeywords(text, options = {}) {
     }
 
     if (result.length > 0) {
-        console.log(`[VectHare Keyword Extraction] Extracted text keywords (${level} level): [${result.map(k => `${k.text}(${k.weight.toFixed(2)}x, freq:${k.frequency})`).join(', ')}] from: "${text.substring(0, 80)}${text.length > 80 ? '...' : ''}"`);
+        console.debug(`[VectHare Keyword Extraction] Extracted text keywords (${level} level): [${result.map(k => `${k.text}(${k.weight.toFixed(2)}x, freq:${k.frequency})`).join(', ')}] from: "${text.substring(0, 80)}${text.length > 80 ? '...' : ''}"`);
     }
 
     return result;
@@ -265,7 +265,7 @@ export function extractChatKeywords(text, options = {}) {
     }
 
     if (keywords.length > 0) {
-        console.log(`[VectHare Keyword Extraction] Extracted chat keywords: [${keywords.map(k => `${k.text}(${k.weight.toFixed(2)}x)`).join(', ')}] from text: "${text.substring(0, 80)}${text.length > 80 ? '...' : ''}"`);
+        console.debug(`[VectHare Keyword Extraction] Extracted chat keywords: [${keywords.map(k => `${k.text}(${k.weight.toFixed(2)}x)`).join(', ')}] from text: "${text.substring(0, 80)}${text.length > 80 ? '...' : ''}"`);
     }
 
     return keywords;

@@ -377,6 +377,9 @@ async function rerankWithBananaBread(query, chunks, settings) {
 export async function synchronizeChat(settings, batchSize = 5) {
     // Build proper collection ID using chat UUID first
     const collectionId = getChatCollectionId();
+    console.log(`🔍 VectHare DEBUG: getChatCollectionId() returned: "${collectionId}"`);
+    console.log(`🔍 VectHare DEBUG: settings.vector_backend = "${settings.vector_backend}"`);
+    console.log(`🔍 VectHare DEBUG: settings.source = "${settings.source}"`);
     if (!collectionId) {
         return { remaining: -1, messagesProcessed: 0, chunksCreated: 0 };
     }
@@ -466,9 +469,15 @@ export async function synchronizeChat(settings, batchSize = 5) {
 
                     // Register on first successful insert (prevents ghost collections)
                     if (!isRegistered) {
-                        registerCollection(collectionId);
+                        // Construct proper registry key: backend:source:collectionId
+                        const backend = settings.vector_backend || 'standard';
+                        const source = settings.source || 'transformers';
+                        const registryKey = `${backend}:${source}:${collectionId}`;
+                        console.log(`🔍 VectHare DEBUG: Registering collection with key: "${registryKey}"`);
+                        console.log(`🔍 VectHare DEBUG: Components: backend="${backend}", source="${source}", collectionId="${collectionId}"`);
+                        registerCollection(registryKey);
                         isRegistered = true;
-                        console.log(`VectHare: Registered collection ${collectionId} after first successful insert`);
+                        console.log(`VectHare: Registered collection ${registryKey} after first successful insert`);
                     }
                 }
             } catch (itemError) {
@@ -1326,9 +1335,16 @@ function resolveChunkInjectionPosition(chunk, settings) {
 function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
     // Control print: Log chunks being injected
     console.log(`[VectHare Injection Control] Starting injection of ${chunksToInject.length} chunks`);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     chunksToInject.forEach((chunk, idx) => {
-        console.log(`  [${idx + 1}/${chunksToInject.length}] Hash: ${chunk.hash}, Score: ${chunk.score?.toFixed(4)}, Collection: ${chunk.collectionId}, Text: "${chunk.text?.substring(0, 80)}${chunk.text?.length > 80 ? '...' : ''}"`);
+        console.log(`  [${idx + 1}/${chunksToInject.length}] CHUNK INJECTED INTO PROMPT`);
+        console.log(`      Hash: ${chunk.hash}`);
+        console.log(`      Score: ${chunk.score?.toFixed(4)}`);
+        console.log(`      Collection: ${chunk.collectionId}`);
+        console.log(`      Text: "${chunk.text?.substring(0, 120)}${chunk.text?.length > 120 ? '...' : ''}"`);
+        console.log('      ─────────────────────────────────────────────────────────────────');
     });
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
     // Group chunks by resolved injection position+depth
     const positionGroups = new Map(); // "position:depth" → chunks[]
@@ -1453,6 +1469,8 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
  * @param {string} type Generation type
  */
 export async function rearrangeChat(chat, settings, type) {
+    console.log(`🐰 VectHare: rearrangeChat called (type: ${type}, chat length: ${chat?.length || 0})`);
+
     try {
         // === EARLY EXITS ===
         if (type === 'quiet') {
@@ -1476,14 +1494,16 @@ export async function rearrangeChat(chat, settings, type) {
         }
 
         if (chat.length < settings.protect) {
-            console.debug(`VectHare: Not enough messages (${chat.length} < ${settings.protect})`);
+            console.warn(`⚠️ VectHare: Not enough messages to inject chunks (${chat.length} < ${settings.protect})`);
+            console.log(`   💡 You need at least ${settings.protect} messages before chunk injection starts`);
             return;
         }
 
         // === STAGE 1: Gather collections to query ===
         const collectionsToQuery = gatherCollectionsToQuery(settings);
         if (collectionsToQuery.length === 0) {
-            console.debug('VectHare: No enabled collections to query');
+            console.warn('⚠️ VectHare: No enabled collections to query - chunks cannot be injected!');
+            console.log('   💡 Make sure you have enabled at least one collection in VectHare settings');
             return;
         }
         console.log(`VectHare: Will query ${collectionsToQuery.length} collections:`, collectionsToQuery);
@@ -1507,10 +1527,11 @@ export async function rearrangeChat(chat, settings, type) {
         const activeCollections = await filterActiveCollections(collectionsToQuery, searchContext);
 
         if (activeCollections.length === 0) {
-            console.debug('VectHare: No collections passed activation conditions');
+            console.log('⚠️ VectHare: No collections passed activation conditions - chunks cannot be injected!');
+            console.log('   💡 Check your collection activation conditions in VectHare settings');
             return;
         }
-        console.log(`VectHare: ${activeCollections.length} collections passed activation filters:`, activeCollections);
+        console.log(`✅ VectHare: ${activeCollections.length} collections passed activation filters:`, activeCollections);
 
         // === INITIALIZE DEBUG DATA ===
         const debugData = createDebugData();
@@ -1595,7 +1616,8 @@ export async function rearrangeChat(chat, settings, type) {
         const { toInject: chunksToInject, skipped: skippedDuplicates } = deduplicateChunks(chunks, chat, debugData);
 
         if (chunksToInject.length === 0) {
-            console.debug('VectHare: All retrieved chunks already in context, nothing to inject');
+            console.log('ℹ️ VectHare: All retrieved chunks already in context, nothing to inject');
+            console.log(`   ${skippedDuplicates.length} chunks were skipped (already in current chat)`);
             debugData.stages.injected = [];
             debugData.stats.actuallyInjected = 0;
             debugData.stats.skippedDuplicates = skippedDuplicates.length;
@@ -1609,6 +1631,10 @@ export async function rearrangeChat(chat, settings, type) {
 
         // === STAGE 10: Inject into prompt ===
         const injection = injectChunksIntoPrompt(chunksToInject, settings, debugData);
+
+        console.log(`\n✅ VectHare: Successfully injected ${chunksToInject.length} chunk(s) into prompt`);
+        console.log(`   Verification: ${injection.verified ? '✓ PASSED' : '✗ FAILED'}`);
+        console.log(`   Total characters injected: ${injection.text.length}\n`);
 
         // Finalize debug data
         debugData.stages.injected = chunksToInject;

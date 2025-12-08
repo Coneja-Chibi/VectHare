@@ -52,6 +52,7 @@ const defaultSettings = {
     qdrant_url: '',
     qdrant_api_key: '',
     qdrant_use_cloud: false,
+    qdrant_multitenancy: false, // Use single collection with content_type field instead of separate collections
     milvus_host: 'localhost',
     milvus_port: 19530,
     milvus_username: '',

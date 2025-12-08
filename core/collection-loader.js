@@ -253,7 +253,16 @@ function getCollectionDisplayName(collectionId, metadata) {
                 return `💬 Chat: ${character.name}`;
             }
 
-            // Fallback to ID
+              // Fallback: extract character name from rawId if it follows pattern: charName_uuid
+            // Format: assistant_503c1099-b769-41e7-8e15-0d652cd6d1b4
+            const underscoreIndex = chatId.lastIndexOf('_');
+            if (underscoreIndex > 0) {
+                // Extract everything before the last underscore (the character name)
+                const charName = chatId.substring(0, underscoreIndex);
+                return `💬 Chat: ${charName}`;
+            }
+
+            // Final fallback to just the ID
             return `💬 Chat #${chatId.substring(0, 8)}`;
         }
 

@@ -39,6 +39,7 @@ import {
     getUrlProviders
 } from './providers.js';
 import { applyKeywordBoosts, getOverfetchAmount } from './keyword-boost.js';
+import { applyBM25Scoring } from './bm25-scorer.js';
 import AsyncUtils from '../utils/async-utils.js';
 import StringUtils from '../utils/string-utils.js';
 import {
@@ -757,17 +758,48 @@ export async function queryCollection(collectionId, searchText, topK, settings) 
         text: meta.text || ''
     }));
 
-    // Apply keyword boosts and trim to requested topK
-    const boostedResults = applyKeywordBoosts(resultsForBoost, searchText, topK);
+    // Determine scoring method from settings
+    const scoringMethod = settings.keyword_scoring_method || 'keyword'; // 'keyword', 'bm25', or 'hybrid'
+    let finalResults;
+
+    if (scoringMethod === 'bm25') {
+        // Use BM25 scoring only
+        console.log('[VectHare] Using BM25 scoring');
+        const bm25Results = applyBM25Scoring(resultsForBoost, searchText, {
+            k1: settings.bm25_k1 || 1.5,
+            b: settings.bm25_b || 0.75,
+            alpha: 0.5,  // 50% vector similarity
+            beta: 0.5    // 50% BM25 keyword relevance
+        });
+        finalResults = bm25Results.slice(0, topK);
+    } else if (scoringMethod === 'hybrid') {
+        // Use both keyword boost and BM25
+        console.log('[VectHare] Using hybrid (keyword + BM25) scoring');
+        const keywordBoosted = applyKeywordBoosts(resultsForBoost, searchText, overfetchAmount);
+        const hybridResults = applyBM25Scoring(keywordBoosted, searchText, {
+            k1: settings.bm25_k1 || 1.5,
+            b: settings.bm25_b || 0.75,
+            alpha: 0.6,  // 60% vector+keyword score
+            beta: 0.4    // 40% BM25 score
+        });
+        finalResults = hybridResults.slice(0, topK);
+    } else {
+        // Use traditional keyword boost (default)
+        console.log('[VectHare] Using keyword boost scoring');
+        finalResults = applyKeywordBoosts(resultsForBoost, searchText, topK);
+    }
 
     // Convert back to expected format
     return {
-        hashes: boostedResults.map(r => r.hash),
-        metadata: boostedResults.map(r => ({
+        hashes: finalResults.map(r => r.hash),
+        metadata: finalResults.map(r => ({
             ...r.metadata,
             score: r.score,
-            originalScore: r.originalScore,
+            originalScore: r.originalScore || r.vectorScore,
             keywordBoost: r.keywordBoost,
+            bm25Score: r.bm25Score,
+            normalizedBM25: r.normalizedBM25,
+            vectorScore: r.vectorScore,
             matchedKeywords: r.matchedKeywords,
             matchedKeywordsWithWeights: r.matchedKeywordsWithWeights,
             keywordBoosted: r.keywordBoosted

@@ -107,6 +107,18 @@ export function renderSettings(containerId, settings, callbacks) {
                                     </label>
                                     <input type="password" id="vecthare_qdrant_api_key" class="vecthare-input" placeholder="Your Qdrant Cloud API key" />
                                 </div>
+
+                                <!-- Qdrant Multitenancy Setting -->
+                                <div style="margin-top: 10px; padding: 8px; background: rgba(0,0,0,0.1); border-radius: 4px;">
+                                    <label class="checkbox_label" title="When enabled, uses a single Qdrant collection with content_type filtering (multitenancy). When disabled, creates separate collections for each content type (better isolation).">
+                                        <input type="checkbox" id="vecthare_qdrant_multitenancy" />
+                                        <span>Use Multitenancy (Single Collection)</span>
+                                    </label>
+                                    <small class="vecthare_hint" style="display: block; margin-top: 4px;">
+                                        <strong>Multitenancy ON:</strong> Single collection with filtering (saves resources)<br>
+                                        <strong>Multitenancy OFF:</strong> Separate collections per content type (better isolation)
+                                    </small>
+                                </div>
                             </div>
 
                             <!-- Milvus Settings (shown only when Milvus backend is selected) -->
@@ -1607,6 +1619,15 @@ function bindSettingsEvents(settings, callbacks) {
         .val(settings.qdrant_api_key || '')
         .on('input', function() {
             settings.qdrant_api_key = String($(this).val());
+            Object.assign(extension_settings.vecthare, settings);
+            saveSettingsDebounced();
+        });
+
+    // Qdrant multitenancy toggle
+    $('#vecthare_qdrant_multitenancy')
+        .prop('checked', settings.qdrant_multitenancy || false)
+        .on('change', function() {
+            settings.qdrant_multitenancy = $(this).prop('checked');
             Object.assign(extension_settings.vecthare, settings);
             saveSettingsDebounced();
         });

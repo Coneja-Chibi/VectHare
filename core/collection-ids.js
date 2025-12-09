@@ -372,39 +372,45 @@ export function matchesPatterns(collectionId, patterns) {
 }
 
 /**
- * Extracts the source prefix from a registry key
- * Registry keys can be "source:collectionId" or just "collectionId"
+ * Extracts backend and source from a registry key
+ * Registry keys can be:
+ * - "backend:source:collectionId" (new format)
+ * - "source:collectionId" (migration format)
+ * - "collectionId" (legacy format)
  *
  * @param {string} registryKey Registry key to parse
- * @returns {{source: string|null, collectionId: string}} Parsed key
+ * @returns {{backend: string|null, source: string|null, collectionId: string}} Parsed key
  */
 export function parseRegistryKey(registryKey) {
     if (!registryKey || typeof registryKey !== 'string') {
-        return { source: null, collectionId: '' };
+        return { backend: null, source: null, collectionId: '' };
     }
 
-    // Check if it's a "source:collectionId" format
-    // But be careful - vh:chat:uuid also has colons
-    // Source prefixes are: transformers, openai, cohere, etc. (no colons in them)
-
-    const firstColon = registryKey.indexOf(':');
-    if (firstColon === -1) {
-        return { source: null, collectionId: registryKey };
-    }
-
-    const potentialSource = registryKey.substring(0, firstColon);
-
-    // Known embedding sources (not vh:)
+    // Known backends and embedding sources
+    const knownBackends = ['standard', 'lancedb', 'vectra', 'milvus', 'qdrant'];
     const knownSources = ['transformers', 'openai', 'cohere', 'ollama', 'llamacpp',
         'vllm', 'koboldcpp', 'webllm', 'bananabread', 'openrouter'];
 
-    if (knownSources.includes(potentialSource)) {
+    const parts = registryKey.split(':');
+
+    // New format: backend:source:collectionId (3+ parts)
+    if (parts.length >= 3 && knownBackends.includes(parts[0]) && knownSources.includes(parts[1])) {
         return {
-            source: potentialSource,
-            collectionId: registryKey.substring(firstColon + 1),
+            backend: parts[0],
+            source: parts[1],
+            collectionId: parts.slice(2).join(':'),  // Rest is collection ID (may contain colons)
         };
     }
 
-    // Not a source prefix, return as-is
-    return { source: null, collectionId: registryKey };
+    // Migration format: source:collectionId (2+ parts, starts with source)
+    if (parts.length >= 2 && knownSources.includes(parts[0])) {
+        return {
+            backend: null,  // Backend unknown in old format
+            source: parts[0],
+            collectionId: parts.slice(1).join(':'),
+        };
+    }
+
+    // Legacy format: just collectionId (no colons, or unknown prefix)
+    return { backend: null, source: null, collectionId: registryKey };
 }

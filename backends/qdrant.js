@@ -5,15 +5,26 @@
  * Uses the Similharity plugin's unified /chunks/* endpoints.
  * Backend: Qdrant (external vector database server)
  *
- * MULTITENANCY SUPPORT:
- * - Uses ONE collection ("vecthare_main") with payload filters
- * - Passes type and sourceId for data isolation
- * - Supports all VectHare features via payload metadata
+ * COLLECTION STRATEGY (configurable via settings.qdrant_multitenancy):
+ * 
+ * MULTITENANCY MODE (qdrant_multitenancy = true):
+ * - Uses a single shared collection: "vecthare_multitenancy"
+ * - Adds content_type metadata field to distinguish different sources
+ * - Uses Qdrant filtering to query only the relevant content_type
+ * - More efficient for resource usage, suitable for smaller deployments
+ *
+ * SEPARATE COLLECTIONS MODE (qdrant_multitenancy = false, DEFAULT):
+ * - Creates separate collections per content type/source
+ * - Each chat vectorization gets its own collection
+ * - Each character gets its own collection
+ * - Each lorebook gets its own collection
+ * - Better organization and isolation of data
+ * - Recommended for production use
  *
  * Requires either a local Qdrant instance or Qdrant Cloud account.
  *
  * @author VectHare
- * @version 3.0.0
+ * @version 3.2.0
  * ============================================================================
  */
 
@@ -23,6 +34,7 @@ import { getModelField } from '../core/providers.js';
 import { VECTOR_LIST_LIMIT } from '../core/constants.js';
 
 const BACKEND_TYPE = 'qdrant';
+const MULTITENANCY_COLLECTION = 'vecthare_multitenancy';
 
 /**
  * Get the model value from settings based on provider
@@ -30,6 +42,19 @@ const BACKEND_TYPE = 'qdrant';
 function getModelFromSettings(settings) {
     const modelField = getModelField(settings.source);
     return modelField ? settings[modelField] || '' : '';
+}
+
+/**
+ * Determines the actual collection name to use based on multitenancy setting
+ * @param {string} collectionId - Original collection ID
+ * @param {object} settings - VectHare settings
+ * @returns {string} - Actual collection name to use
+ */
+function getActualCollectionId(collectionId, settings) {
+    if (settings.qdrant_multitenancy) {
+        return MULTITENANCY_COLLECTION;
+    }
+    return collectionId;
 }
 
 export class QdrantBackend extends VectorBackend {
@@ -73,32 +98,68 @@ export class QdrantBackend extends VectorBackend {
     }
 
     /**
+     * Strip registry key prefix (backend:source:collectionId) to get just the collection ID
+     * @param {string} collectionId - May be plain ID or prefixed registry key
+     * @returns {string} - Just the collection ID part
+     */
+    _stripRegistryPrefix(collectionId) {
+        if (!collectionId || typeof collectionId !== 'string') {
+            return collectionId;
+        }
+
+        const knownBackends = ['standard', 'lancedb', 'vectra', 'milvus', 'qdrant'];
+        const knownSources = ['transformers', 'openai', 'cohere', 'ollama', 'llamacpp',
+            'vllm', 'koboldcpp', 'webllm', 'bananabread', 'openrouter'];
+
+        const parts = collectionId.split(':');
+
+        // Check if it starts with backend:source: prefix
+        if (parts.length >= 3 && knownBackends.includes(parts[0]) && knownSources.includes(parts[1])) {
+            return parts.slice(2).join(':');
+        }
+        // Check if it starts with source: prefix (old format)
+        else if (parts.length >= 2 && knownSources.includes(parts[0])) {
+            return parts.slice(1).join(':');
+        }
+
+        // Already plain collection ID
+        return collectionId;
+    }
+
+    /**
      * Parse collection ID to extract type and sourceId for multitenancy
+     * Handles registry key format: backend:source:collectionId
+     * Extracts just the collectionId part and parses it
+     *
      * New format: vh:{type}:{uuid}
      * Examples:
      *   "vh:chat:a1b2c3d4-e5f6-7890-abcd-ef1234567890" → {type: "chat", sourceId: "a1b2..."}
      *   "vh:lorebook:world_info_123" → {type: "lorebook", sourceId: "world_info_123"}
      *   "vh:doc:char_456" → {type: "doc", sourceId: "char_456"}
+     *
+     * Legacy format: vecthare_{type}_{sourceId}
      */
     _parseCollectionId(collectionId) {
+        // First strip any registry prefix
+        collectionId = this._stripRegistryPrefix(collectionId);
         if (!collectionId || typeof collectionId !== 'string') {
             return { type: 'unknown', sourceId: 'unknown' };
         }
 
-        const parts = collectionId.split(':');
+        // Now parse the actual collection ID
+        const idParts = collectionId.split(':');
 
         // New format: vh:{type}:{sourceId}
-        if (parts.length >= 3 && parts[0] === 'vh') {
+        if (idParts.length >= 3 && idParts[0] === 'vh') {
             return {
-                type: parts[1],
-                sourceId: parts.slice(2).join(':') // Handle UUIDs that might have colons
+                type: idParts[1],
+                sourceId: idParts.slice(2).join(':') // Handle UUIDs that might have colons
             };
         }
 
         // Legacy format: vecthare_{type}_{sourceId}
         const legacyParts = collectionId.split('_');
         if (legacyParts.length >= 3 && legacyParts[0] === 'vecthare') {
-            console.warn('VectHare: Legacy collection ID format detected:', collectionId);
             return {
                 type: legacyParts[1],
                 sourceId: legacyParts.slice(2).join('_')
@@ -114,24 +175,35 @@ export class QdrantBackend extends VectorBackend {
     }
 
     async getSavedHashes(collectionId, settings) {
-        const { type, sourceId } = this._parseCollectionId(collectionId);
+        const strippedCollectionId = this._stripRegistryPrefix(collectionId);
+        const actualCollectionId = getActualCollectionId(strippedCollectionId, settings);
+        
+        const body = {
+            backend: BACKEND_TYPE,
+            collectionId: actualCollectionId,
+            source: settings.source || 'transformers',
+            model: getModelFromSettings(settings),
+            limit: VECTOR_LIST_LIMIT,
+        };
+
+        // Add content_type filter for multitenancy mode
+        if (settings.qdrant_multitenancy) {
+            body.filter = {
+                must: [
+                    { key: 'content_type', match: { value: strippedCollectionId } }
+                ]
+            };
+        }
 
         const response = await fetch('/api/plugins/similharity/chunks/list', {
             method: 'POST',
             headers: getRequestHeaders(),
-            body: JSON.stringify({
-                backend: BACKEND_TYPE,
-                collectionId: 'vecthare_main', // Always use main collection
-                source: settings.source || 'transformers',
-                model: getModelFromSettings(settings),
-                limit: VECTOR_LIST_LIMIT,
-                filters: { type, sourceId }, // Filter by tenant
-            }),
+            body: JSON.stringify(body),
         });
 
         if (!response.ok) {
             const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`[Qdrant] Failed to get saved hashes for ${collectionId} (type: ${type}, sourceId: ${sourceId}): ${response.status} ${response.statusText} - ${errorBody}`);
+            throw new Error(`[Qdrant] Failed to get saved hashes for ${collectionId}: ${response.status} ${response.statusText} - ${errorBody}`);
         }
 
         const data = await response.json();
@@ -141,20 +213,25 @@ export class QdrantBackend extends VectorBackend {
     async insertVectorItems(collectionId, items, settings) {
         if (items.length === 0) return;
 
-        const { type, sourceId } = this._parseCollectionId(collectionId);
+        // Strip registry key prefix to get the actual collection ID for Qdrant
+        const strippedCollectionId = this._stripRegistryPrefix(collectionId);
+        const actualCollectionId = getActualCollectionId(strippedCollectionId, settings);
 
         const response = await fetch('/api/plugins/similharity/chunks/insert', {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({
                 backend: BACKEND_TYPE,
-                collectionId: 'vecthare_main', // Always use main collection
-                items: items.map(item => ({
-                    hash: item.hash,
-                    text: item.text,
-                    index: item.index,
-                    vector: item.vector,
-                    metadata: {
+                collectionId: actualCollectionId,
+                items: items.map(item => {
+                    // Include keywords in the text for embedding/indexing
+                    let textWithKeywords = item.text || '';
+                    if (item.keywords && item.keywords.length > 0) {
+                        const keywordTexts = item.keywords.map(kw => kw.text || kw).join(' ');
+                        textWithKeywords += ` [KEYWORDS: ${keywordTexts}]`;
+                    }
+
+                    const metadata = {
                         ...item.metadata,
                         // Pass through VectHare-specific fields
                         importance: item.importance,
@@ -166,65 +243,100 @@ export class QdrantBackend extends VectorBackend {
                         summary: item.summary,
                         isSummaryChunk: item.isSummaryChunk,
                         parentHash: item.parentHash,
+                    };
+
+                    // Add content_type for multitenancy mode
+                    if (settings.qdrant_multitenancy) {
+                        metadata.content_type = strippedCollectionId;
                     }
-                })),
+
+                    return {
+                        hash: item.hash,
+                        text: textWithKeywords,
+                        index: item.index,
+                        vector: item.vector,
+                        metadata,
+                    };
+                }),
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                filters: { type, sourceId }, // Pass multitenancy info
             }),
         });
 
         if (!response.ok) {
             const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`[Qdrant] Failed to insert ${items.length} vectors into ${collectionId} (type: ${type}, sourceId: ${sourceId}): ${response.status} ${response.statusText} - ${errorBody}`);
+            throw new Error(`[Qdrant] Failed to insert ${items.length} vectors into ${actualCollectionId}: ${response.status} ${response.statusText} - ${errorBody}`);
         }
 
-        console.log(`VectHare Qdrant: Inserted ${items.length} vectors (type: ${type}, sourceId: ${sourceId})`);
+        const mode = settings.qdrant_multitenancy ? 'multitenancy' : 'separate';
+        console.log(`VectHare Qdrant: Inserted ${items.length} vectors into ${actualCollectionId} (${mode} mode, content_type: ${strippedCollectionId})`);
     }
 
     async deleteVectorItems(collectionId, hashes, settings) {
-        const { type, sourceId } = this._parseCollectionId(collectionId);
+        const strippedCollectionId = this._stripRegistryPrefix(collectionId);
+        const actualCollectionId = getActualCollectionId(strippedCollectionId, settings);
+        
+        const body = {
+            backend: BACKEND_TYPE,
+            collectionId: actualCollectionId,
+            hashes: hashes,
+            source: settings.source || 'transformers',
+            model: getModelFromSettings(settings),
+        };
+
+        // Add content_type filter for multitenancy mode
+        if (settings.qdrant_multitenancy) {
+            body.filter = {
+                must: [
+                    { key: 'content_type', match: { value: strippedCollectionId } }
+                ]
+            };
+        }
 
         const response = await fetch('/api/plugins/similharity/chunks/delete', {
             method: 'POST',
             headers: getRequestHeaders(),
-            body: JSON.stringify({
-                backend: BACKEND_TYPE,
-                collectionId: 'vecthare_main',
-                hashes: hashes,
-                source: settings.source || 'transformers',
-                model: getModelFromSettings(settings),
-                filters: { type, sourceId },
-            }),
+            body: JSON.stringify(body),
         });
 
         if (!response.ok) {
             const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`[Qdrant] Failed to delete vectors from ${collectionId} (type: ${type}, sourceId: ${sourceId}): ${response.status} ${response.statusText} - ${errorBody}`);
+            throw new Error(`[Qdrant] Failed to delete vectors from ${collectionId}: ${response.status} ${response.statusText} - ${errorBody}`);
         }
     }
 
-    async queryCollection(collectionId, searchText, topK, settings) {
-        const { type, sourceId } = this._parseCollectionId(collectionId);
+    async queryCollection(collectionId, searchText, topK, settings, queryVector = null) {
+        const strippedCollectionId = this._stripRegistryPrefix(collectionId);
+        const actualCollectionId = getActualCollectionId(strippedCollectionId, settings);
+        
+        const body = {
+            backend: BACKEND_TYPE,
+            collectionId: actualCollectionId,
+            searchText: searchText,
+            topK: topK,
+            threshold: 0.0,
+            source: settings.source || 'transformers',
+            model: getModelFromSettings(settings),
+        };
+
+        // Add content_type filter for multitenancy mode
+        if (settings.qdrant_multitenancy) {
+            body.filter = {
+                must: [
+                    { key: 'content_type', match: { value: strippedCollectionId } }
+                ]
+            };
+        }
 
         const response = await fetch('/api/plugins/similharity/chunks/query', {
             method: 'POST',
             headers: getRequestHeaders(),
-            body: JSON.stringify({
-                backend: BACKEND_TYPE,
-                collectionId: 'vecthare_main',
-                searchText: searchText,
-                topK: topK,
-                threshold: 0.0,
-                source: settings.source || 'transformers',
-                model: getModelFromSettings(settings),
-                filters: { type, sourceId },
-            }),
+            body: JSON.stringify(body),
         });
 
         if (!response.ok) {
             const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`[Qdrant] Failed to query collection ${collectionId} (type: ${type}, sourceId: ${sourceId}): ${response.status} ${response.statusText} - ${errorBody}`);
+            throw new Error(`[Qdrant] Failed to query collection ${collectionId}: ${response.status} ${response.statusText} - ${errorBody}`);
         }
 
         const data = await response.json();
@@ -246,21 +358,32 @@ export class QdrantBackend extends VectorBackend {
 
         for (const collectionId of collectionIds) {
             try {
-                const { type, sourceId } = this._parseCollectionId(collectionId);
+                const strippedCollectionId = this._stripRegistryPrefix(collectionId);
+                const actualCollectionId = getActualCollectionId(strippedCollectionId, settings);
+                
+                const body = {
+                    backend: BACKEND_TYPE,
+                    collectionId: actualCollectionId,
+                    searchText: searchText,
+                    topK: topK,
+                    threshold: threshold,
+                    source: settings.source || 'transformers',
+                    model: getModelFromSettings(settings),
+                };
+
+                // Add content_type filter for multitenancy mode
+                if (settings.qdrant_multitenancy) {
+                    body.filter = {
+                        must: [
+                            { key: 'content_type', match: { value: strippedCollectionId } }
+                        ]
+                    };
+                }
 
                 const response = await fetch('/api/plugins/similharity/chunks/query', {
                     method: 'POST',
                     headers: getRequestHeaders(),
-                    body: JSON.stringify({
-                        backend: BACKEND_TYPE,
-                        collectionId: 'vecthare_main',
-                        searchText: searchText,
-                        topK: topK,
-                        threshold: threshold,
-                        source: settings.source || 'transformers',
-                model: getModelFromSettings(settings),
-                        filters: { type, sourceId },
-                    }),
+                    body: JSON.stringify(body),
                 });
 
                 if (response.ok) {
@@ -292,26 +415,24 @@ export class QdrantBackend extends VectorBackend {
     }
 
     async purgeVectorIndex(collectionId, settings) {
-        const { type, sourceId } = this._parseCollectionId(collectionId);
-
+        const actualCollectionId = this._stripRegistryPrefix(collectionId);
         const response = await fetch('/api/plugins/similharity/chunks/purge', {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({
                 backend: BACKEND_TYPE,
-                collectionId: 'vecthare_main',
+                collectionId: actualCollectionId, // Use separate collection per content type
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                filters: { type, sourceId }, // Purge specific tenant
             }),
         });
 
         if (!response.ok) {
             const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`[Qdrant] Failed to purge collection ${collectionId} (type: ${type}, sourceId: ${sourceId}): ${response.status} ${response.statusText} - ${errorBody}`);
+            throw new Error(`[Qdrant] Failed to purge collection ${collectionId}: ${response.status} ${response.statusText} - ${errorBody}`);
         }
 
-        console.log(`VectHare Qdrant: Purged (type: ${type}, sourceId: ${sourceId})`);
+         console.log(`VectHare Qdrant: Purged (type: ${type}, sourceId: ${sourceId})`);
     }
 
     async purgeFileVectorIndex(collectionId, settings) {
@@ -319,23 +440,9 @@ export class QdrantBackend extends VectorBackend {
     }
 
     async purgeAllVectorIndexes(settings) {
-        // Purge the entire main collection
-        const response = await fetch('/api/plugins/similharity/chunks/purge', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-            body: JSON.stringify({
-                backend: BACKEND_TYPE,
-                collectionId: 'vecthare_main',
-                source: settings.source || 'transformers',
-                model: getModelFromSettings(settings),
-                // No filters = purge everything
-            }),
-        });
-
-        if (!response.ok) {
-            const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`[Qdrant] Failed to purge all collections: ${response.status} ${response.statusText} - ${errorBody}`);
-        }
+        // Note: With separate collections per content type, we need to purge each collection individually
+        console.warn('VectHare: purgeAllVectorIndexes now requires calling purgeVectorIndex for each collection');
+        throw new Error('purgeAllVectorIndexes requires collection IDs - call purgeVectorIndex for each collection instead');
     }
 
     // ========================================================================
@@ -346,13 +453,12 @@ export class QdrantBackend extends VectorBackend {
      * Get a single chunk by hash
      */
     async getChunk(collectionId, hash, settings) {
-        const { type, sourceId } = this._parseCollectionId(collectionId);
-
+        const actualCollectionId = this._stripRegistryPrefix(collectionId);
         const response = await fetch(`/api/plugins/similharity/chunks/${encodeURIComponent(hash)}?` + new URLSearchParams({
             backend: BACKEND_TYPE,
-            collectionId: 'vecthare_main',
+            collectionId: actualCollectionId, // Use separate collection per content type
             source: settings.source || 'transformers',
-                model: getModelFromSettings(settings),
+            model: getModelFromSettings(settings),
         }), {
             headers: getRequestHeaders(),
         });
@@ -371,26 +477,24 @@ export class QdrantBackend extends VectorBackend {
      * List chunks with pagination
      */
     async listChunks(collectionId, settings, options = {}) {
-        const { type, sourceId } = this._parseCollectionId(collectionId);
-
+        const actualCollectionId = this._stripRegistryPrefix(collectionId);
         const response = await fetch('/api/plugins/similharity/chunks/list', {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({
                 backend: BACKEND_TYPE,
-                collectionId: 'vecthare_main',
+                collectionId: actualCollectionId, // Use separate collection per content type
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
                 offset: options.offset || 0,
                 limit: options.limit || 100,
                 includeVectors: options.includeVectors || false,
-                filters: { type, sourceId },
             }),
         });
 
         if (!response.ok) {
             const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`[Qdrant] Failed to list chunks in ${collectionId} (type: ${type}, sourceId: ${sourceId}): ${response.status} ${response.statusText} - ${errorBody}`);
+            throw new Error(`[Qdrant] Failed to list chunks in ${collectionId}: ${response.status} ${response.statusText} - ${errorBody}`);
         }
 
         return await response.json();
@@ -400,18 +504,16 @@ export class QdrantBackend extends VectorBackend {
      * Update chunk text (triggers re-embedding)
      */
     async updateChunkText(collectionId, hash, newText, settings) {
-        const { type, sourceId } = this._parseCollectionId(collectionId);
-
+        const actualCollectionId = this._stripRegistryPrefix(collectionId);
         const response = await fetch(`/api/plugins/similharity/chunks/${encodeURIComponent(hash)}/text`, {
             method: 'PATCH',
             headers: getRequestHeaders(),
             body: JSON.stringify({
                 backend: BACKEND_TYPE,
-                collectionId: 'vecthare_main',
+                collectionId: actualCollectionId, // Use separate collection per content type
                 text: newText,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                filters: { type, sourceId },
             }),
         });
 
@@ -427,18 +529,16 @@ export class QdrantBackend extends VectorBackend {
      * Update chunk metadata (no re-embedding)
      */
     async updateChunkMetadata(collectionId, hash, metadata, settings) {
-        const { type, sourceId } = this._parseCollectionId(collectionId);
-
+        const actualCollectionId = this._stripRegistryPrefix(collectionId);
         const response = await fetch(`/api/plugins/similharity/chunks/${encodeURIComponent(hash)}/metadata`, {
             method: 'PATCH',
             headers: getRequestHeaders(),
             body: JSON.stringify({
                 backend: BACKEND_TYPE,
-                collectionId: 'vecthare_main',
+                collectionId: actualCollectionId, // Use separate collection per content type
                 metadata: metadata,
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                filters: { type, sourceId },
             }),
         });
 
@@ -454,23 +554,21 @@ export class QdrantBackend extends VectorBackend {
      * Get collection statistics
      */
     async getStats(collectionId, settings) {
-        const { type, sourceId } = this._parseCollectionId(collectionId);
-
+        const actualCollectionId = this._stripRegistryPrefix(collectionId);
         const response = await fetch('/api/plugins/similharity/chunks/stats', {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({
                 backend: BACKEND_TYPE,
-                collectionId: 'vecthare_main',
+                collectionId: actualCollectionId, // Use separate collection per content type
                 source: settings.source || 'transformers',
                 model: getModelFromSettings(settings),
-                filters: { type, sourceId },
             }),
         });
 
         if (!response.ok) {
             const errorBody = await response.text().catch(() => 'No response body');
-            throw new Error(`[Qdrant] Failed to get stats for ${collectionId} (type: ${type}, sourceId: ${sourceId}): ${response.status} ${response.statusText} - ${errorBody}`);
+            throw new Error(`[Qdrant] Failed to get stats for ${collectionId}: ${response.status} ${response.statusText} - ${errorBody}`);
         }
 
         const data = await response.json();

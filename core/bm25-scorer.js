@@ -143,6 +143,8 @@ export class BM25Scorer {
      * @returns {number} BM25 score
      */
     scoreDocument(queryTokens, docIndex) {
+        if (this.avgDocLength === 0) return 0; // Avoid division by zero
+
         const docTF = this.documentTermFreqs[docIndex];
         const docLength = this.documentLengths[docIndex];
 

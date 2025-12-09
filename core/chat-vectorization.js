@@ -1238,10 +1238,10 @@ function deduplicateChunks(chunks, chat, settings, debugData) {
 
         if (isInChat) {
             const matchedMsg = chatHashMap.get(chunk.hash);
-            console.log(`[VectHare Dedup] ❌ SKIPPING chunk (hash: ${chunk.hash})`);
-            console.log(`  Chunk text: "${chunk.text?.substring(0, 80)}..."`);
-            console.log(`  Matches chat message #${matchedMsg.index} from ${matchedMsg.name}: "${matchedMsg.preview}..."`);
-            console.log(`  Score: ${chunk.score?.toFixed(4)}, Collection: ${chunk.collectionId}`);
+            console.debug(`[VectHare Dedup] ❌ SKIPPING chunk (hash: ${chunk.hash})`);
+            console.debug(`  Chunk text: "${chunk.text?.substring(0, 80)}..."`);
+            console.debug(`  Matches chat message #${matchedMsg.index} from ${matchedMsg.name}: "${matchedMsg.preview}..."`);
+            console.debug(`  Score: ${chunk.score?.toFixed(4)}, Collection: ${chunk.collectionId}`);
 
             skipped.push(chunk);
             recordChunkFate(debugData, chunk.hash, 'injection', 'skipped',
@@ -1249,8 +1249,8 @@ function deduplicateChunks(chunks, chat, settings, debugData) {
                 { score: chunk.score }
             );
         } else {
-            console.log(`[VectHare Dedup] ✅ KEEPING chunk (hash: ${chunk.hash}, score: ${chunk.score?.toFixed(4)})`);
-            console.log(`  Text: "${chunk.text?.substring(0, 80)}..."`);
+            console.debug(`[VectHare Dedup] ✅ KEEPING chunk (hash: ${chunk.hash}, score: ${chunk.score?.toFixed(4)})`);
+            console.debug(`  Text: "${chunk.text?.substring(0, 80)}..."`);
 
             toInject.push(chunk);
             recordChunkFate(debugData, chunk.hash, 'injection', 'passed',

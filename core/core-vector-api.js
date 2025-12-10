@@ -295,7 +295,7 @@ async function createWebLlmEmbeddings(items, settings) {
 
 /**
  * Creates KoboldCpp embeddings for a list of items.
- * Wrapped with retry, timeout, and rate limiting for robustness.
+ * Wrapped with retry and rate limiting for robustness.
  * @param {string[]} items Items to embed
  * @param {object} settings VectHare settings object
  * @param {Function} onProgress - Optional callback (embedded, total) => void for progress updates

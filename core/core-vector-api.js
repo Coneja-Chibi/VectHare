@@ -130,6 +130,9 @@ const RETRY_CONFIG = {
         const isRetryable =
             message.includes('network') ||
             message.includes('timeout') ||
+            message.includes('failed to fetch') ||
+            message.includes('fetch') ||
+            message.includes('suspended') ||
             message.includes('429') ||
             message.includes('rate limit') ||
             message.includes('too many requests') ||
@@ -618,7 +621,16 @@ export async function insertVectorItems(collectionId, items, settings, onProgres
             // Ensure we have valid text (not empty after cleaning)
             return typeof text === 'string' && text.trim().length > 0 ? text : ' ';
         });
-        const additionalArgs = await getAdditionalArgs(textStrings, settings, onProgress);
+
+        // Embedding phase: 0-50% of total progress
+        const embeddingProgressCallback = onProgress ? (embedded, total) => {
+            const progressPercent = (embedded / total) * 0.5; // Scale to 0-50%
+            const scaledEmbedded = Math.round(progressPercent * items.length);
+            console.log(`[Core Vector API] Embedding phase: ${embedded}/${total} -> ${scaledEmbedded}/${items.length} (${Math.round(progressPercent * 100)}%)`);
+            onProgress(scaledEmbedded, items.length);
+        } : null;
+
+        const additionalArgs = await getAdditionalArgs(textStrings, settings, embeddingProgressCallback);
 
         // additionalArgs.embeddings is a Record<string, number[]> where keys are original text
         // Handle both duplicate texts and ensure all items get embeddings
@@ -629,6 +641,13 @@ export async function insertVectorItems(collectionId, items, settings, onProgres
                 const text = textStrings[i];
                 const embedding = additionalArgs.embeddings[text];
                 if (embedding && Array.isArray(embedding) && embedding.length > 0) {
+                    // Ensure all embedding values are numbers (not objects or undefined)
+                    const isValidEmbedding = embedding.every(val => typeof val === 'number' && !isNaN(val));
+                    if (!isValidEmbedding) {
+                        console.error(`VectHare: Invalid embedding values for item ${i}:`, embedding.slice(0, 5));
+                        missingEmbeddings++;
+                        continue;
+                    }
                     items[i].vector = embedding;
                 } else {
                     missingEmbeddings++;
@@ -663,17 +682,25 @@ export async function insertVectorItems(collectionId, items, settings, onProgres
                 }, RETRY_CONFIG);
             }, settings);
 
-            // Update progress after each batch
+            // Writing phase: 50-100% of total progress
             if (onProgress) {
                 const embeddedCount = (i + 1) * BATCH_SIZE;
                 const actualEmbedded = Math.min(embeddedCount, items.length);
-                console.log(`[Core Vector API] Calling progress callback: ${actualEmbedded}/${items.length}`);
-                onProgress(actualEmbedded, items.length);
+                const progressPercent = 0.5 + ((actualEmbedded / items.length) * 0.5); // Scale to 50-100%
+                const scaledEmbedded = Math.floor(items.length * 0.5) + Math.round((actualEmbedded / items.length) * items.length * 0.5);
+                console.log(`[Core Vector API] Writing phase: ${actualEmbedded}/${items.length} -> ${scaledEmbedded}/${items.length} (${Math.round(progressPercent * 100)}%)`);
+                onProgress(scaledEmbedded, items.length);
             }
         }
     } else {
         // No rate limit - execute all at once (backend handles it)
-        return await backend.insertVectorItems(collectionId, items, settings);
+        await backend.insertVectorItems(collectionId, items, settings);
+
+        // Call progress callback at 100% completion for non-batched execution
+        if (onProgress) {
+            console.log(`[Core Vector API] Non-batched completion: ${items.length}/${items.length} (100%)`);
+            onProgress(items.length, items.length);
+        }
     }
 }
 

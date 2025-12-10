@@ -269,9 +269,15 @@ export class ProgressTracker {
     updateDisplay(statusOverride = '') {
         if (!this.panel || !this.isVisible) return;
 
-        const percent = this.stats.totalItems > 0
-            ? Math.round((this.stats.processedItems / this.stats.totalItems) * 100)
-            : 0;
+        // Calculate progress percentage
+        // Prioritize embedding progress if available, otherwise use processed items
+        let percent = 0;
+        if (this.stats.totalChunksToEmbed > 0 && this.stats.embeddedChunks >= 0) {
+            percent = Math.round((this.stats.embeddedChunks / this.stats.totalChunksToEmbed) * 100);
+            console.log(`[ProgressTracker] Progress bar: ${this.stats.embeddedChunks}/${this.stats.totalChunksToEmbed} = ${percent}%`);
+        } else if (this.stats.totalItems > 0) {
+            percent = Math.round((this.stats.processedItems / this.stats.totalItems) * 100);
+        }
 
         // Update title
         document.getElementById('vecthare_progress_title').textContent = this.currentOperation || 'VectHare Progress';
@@ -324,6 +330,16 @@ export class ProgressTracker {
     generateStatusMessage() {
         if (this.stats.processedItems === 0) {
             return 'Starting...';
+        } else if (this.stats.totalChunksToEmbed > 0 && this.stats.embeddedChunks >= 0) {
+            // When embedding progress is tracked, show phase-specific status
+            const progressPercent = (this.stats.embeddedChunks / this.stats.totalChunksToEmbed) * 100;
+            if (progressPercent <= 50) {
+                return 'Embedding chunks...';
+            } else if (progressPercent < 100) {
+                return 'Writing to database...';
+            } else {
+                return 'Finalizing...';
+            }
         } else if (this.stats.processedItems >= this.stats.totalItems) {
             return 'Finalizing...';
         } else if (this.stats.totalBatches > 0) {

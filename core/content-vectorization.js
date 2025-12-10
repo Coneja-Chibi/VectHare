@@ -89,7 +89,11 @@ export async function vectorizeContent({ contentType, source, settings }) {
             // Update progress with embedding count
             console.log(`[Content Vectorization] Embedding progress callback: ${embedded}/${total}`);
             progressTracker.updateEmbeddingProgress(embedded, total);
-            progressTracker.updateCurrentItem(`Embedding: ${embedded}/${total} chunks (${total - embedded} remaining)`);
+
+            // Determine phase based on progress (0-50% = Embedding, 50-100% = Writing)
+            const progressPercent = (embedded / total) * 100;
+            const phase = progressPercent <= 50 ? 'Embedding' : 'Writing to database';
+            progressTracker.updateCurrentItem(`${phase}: ${embedded}/${total} chunks (${total - embedded} remaining)`);
         });
 
         // Save collection metadata

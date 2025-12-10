@@ -224,20 +224,21 @@ export function getVectorsRequestBody(args = {}, settings) {
 }
 
 /**
- * Gets additional arguments for vector requests.
- * Special handling for WebLLM, KoboldCpp, and BananaBread which generate embeddings client-side.
+ * Gets additional arguments for embeddings.
+ * For client-side providers (webllm, koboldcpp, bananabread), this generates embeddings.
  * @param {string[]} items Items to embed
  * @param {object} settings VectHare settings object
+ * @param {Function} onProgress - Optional callback (embedded, total) => void for progress updates
  * @returns {Promise<object>} Additional arguments
  */
-export async function getAdditionalArgs(items, settings) {
+export async function getAdditionalArgs(items, settings, onProgress = null) {
     const args = {};
     switch (settings.source) {
         case 'webllm':
             args.embeddings = await createWebLlmEmbeddings(items, settings);
             break;
         case 'koboldcpp': {
-            const { embeddings, model } = await createKoboldCppEmbeddings(items, settings);
+            const { embeddings, model } = await createKoboldCppEmbeddings(items, settings, onProgress);
             args.embeddings = embeddings;
             args.model = model;
             break;
@@ -294,74 +295,101 @@ async function createWebLlmEmbeddings(items, settings) {
  * Wrapped with retry, timeout, and rate limiting for robustness.
  * @param {string[]} items Items to embed
  * @param {object} settings VectHare settings object
+ * @param {Function} onProgress - Optional callback (embedded, total) => void for progress updates
  * @returns {Promise<{embeddings: Record<string, number[]>, model: string}>} Calculated embeddings
  */
-async function createKoboldCppEmbeddings(items, settings) {
+async function createKoboldCppEmbeddings(items, settings, onProgress = null) {
     // Clean text before embedding (strip HTML/Markdown)
     const cleanedItems = items.map(item => stripFormatting(item) || item);
 
-    return await dynamicRateLimiter.execute(async () => {
-        return await AsyncUtils.retry(async () => {
-            const serverUrl = settings.use_alt_endpoint ? settings.alt_endpoint_url : textgenerationwebui_settings.server_urls[textgen_types.KOBOLDCPP];
-            if (!serverUrl) {
-                throw new Error('KoboldCpp URL not found');
-            }
+    // Batch size for progress tracking
+    const BATCH_SIZE = 10;
+    const allEmbeddings = /** @type {Record<string, number[]>} */ ({});
+    let modelName = 'koboldcpp';
 
-            const cleanUrl = serverUrl.replace(/\/$/, '');
-            const response = await fetch(`${cleanUrl}/v1/embeddings`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    input: cleanedItems,
-                    model: settings.koboldcpp_model || 'koboldcpp',
-                }),
+    // Process in batches to show progress
+    for (let i = 0; i < cleanedItems.length; i += BATCH_SIZE) {
+        const batchItems = cleanedItems.slice(i, Math.min(i + BATCH_SIZE, cleanedItems.length));
+        const originalBatchItems = items.slice(i, Math.min(i + BATCH_SIZE, items.length));
+
+        const result = await dynamicRateLimiter.execute(async () => {
+            return await AsyncUtils.retry(async () => {
+                const serverUrl = settings.use_alt_endpoint ? settings.alt_endpoint_url : textgenerationwebui_settings.server_urls[textgen_types.KOBOLDCPP];
+                if (!serverUrl) {
+                    throw new Error('KoboldCpp URL not found');
+                }
+
+                const cleanUrl = serverUrl.replace(/\/$/, '');
+                const response = await fetch(`${cleanUrl}/v1/embeddings`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        input: batchItems,
+                        model: settings.koboldcpp_model || 'koboldcpp',
+                    }),
+                });
+
+                if (!response.ok) {
+                    // Try legacy endpoint if v1 fails (fallback)
+                    if (response.status === 404) {
+                        console.warn('VectHare: KoboldCpp /v1/embeddings not found, trying legacy endpoint...');
+                        // Fallthrough to retry or handle legacy?
+                        // Better to throw specific error so we can potentially retry with legacy logic if we wanted,
+                        // but for now let's stick to the directive of using OpenAI compatible endpoint.
+                    }
+                    throw new Error(`Failed to get KoboldCpp embeddings: ${response.status} ${response.statusText}`);
+                }
+
+                const data = await response.json();
+
+                // OpenAI format: { data: [{ embedding: [], index: 0, ... }, ...], model: "..." }
+                if (!data.data || !Array.isArray(data.data) || data.data.length !== batchItems.length) {
+                     throw new Error('Invalid response from KoboldCpp embeddings (OpenAI format)');
+                }
+
+                // Sort by index to ensure order matches items
+                data.data.sort((a, b) => a.index - b.index);
+
+                const batchEmbeddings = {};
+                for (let j = 0; j < data.data.length; j++) {
+                    const embedding = data.data[j].embedding;
+                    if (!Array.isArray(embedding) || embedding.length === 0) {
+                        throw new Error('KoboldCpp returned an empty embedding.');
+                    }
+                    // Map back to original items (not cleaned) for hash consistency
+                    batchEmbeddings[originalBatchItems[j]] = embedding;
+                }
+
+                return {
+                    embeddings: batchEmbeddings,
+                    model: data.model || 'koboldcpp',
+                };
+            }, {
+                ...RETRY_CONFIG,
+                onRetry: (attempt, error) => {
+                    console.warn(`VectHare: KoboldCpp embedding retry ${attempt} - ${error.message}`);
+                }
             });
+        }, settings);
 
-            if (!response.ok) {
-                // Try legacy endpoint if v1 fails (fallback)
-                if (response.status === 404) {
-                    console.warn('VectHare: KoboldCpp /v1/embeddings not found, trying legacy endpoint...');
-                    // Fallthrough to retry or handle legacy?
-                    // Better to throw specific error so we can potentially retry with legacy logic if we wanted,
-                    // but for now let's stick to the directive of using OpenAI compatible endpoint.
-                }
-                throw new Error(`Failed to get KoboldCpp embeddings: ${response.status} ${response.statusText}`);
-            }
+        // Merge batch embeddings into all embeddings
+        Object.assign(allEmbeddings, result.embeddings);
+        modelName = result.model;
 
-            const data = await response.json();
+        // Call progress callback after each batch
+        const embeddedSoFar = Math.min(i + BATCH_SIZE, items.length);
+        if (onProgress) {
+            console.log(`[KoboldCpp] Calling progress callback: ${embeddedSoFar}/${items.length}`);
+            onProgress(embeddedSoFar, items.length);
+        }
+    }
 
-            // OpenAI format: { data: [{ embedding: [], index: 0, ... }, ...], model: "..." }
-            if (!data.data || !Array.isArray(data.data) || data.data.length !== cleanedItems.length) {
-                 throw new Error('Invalid response from KoboldCpp embeddings (OpenAI format)');
-            }
-
-            const embeddings = /** @type {Record<string, number[]>} */ ({});
-
-            // Sort by index to ensure order matches items
-            data.data.sort((a, b) => a.index - b.index);
-
-            for (let i = 0; i < data.data.length; i++) {
-                const embedding = data.data[i].embedding;
-                if (!Array.isArray(embedding) || embedding.length === 0) {
-                    throw new Error('KoboldCpp returned an empty embedding.');
-                }
-                // Map back to original items (not cleaned) for hash consistency
-                embeddings[items[i]] = embedding;
-            }
-
-            return {
-                embeddings: embeddings,
-                model: data.model || 'koboldcpp',
-            };
-        }, {
-            ...RETRY_CONFIG,
-            onRetry: (attempt, error) => {
-                console.warn(`VectHare: KoboldCpp embedding retry ${attempt} - ${error.message}`);
-            }
-        });
-    }, settings);
+    return {
+        embeddings: allEmbeddings,
+        model: modelName,
+    };
 }
 
 /**
@@ -590,7 +618,7 @@ export async function insertVectorItems(collectionId, items, settings, onProgres
             // Ensure we have valid text (not empty after cleaning)
             return typeof text === 'string' && text.trim().length > 0 ? text : ' ';
         });
-        const additionalArgs = await getAdditionalArgs(textStrings, settings);
+        const additionalArgs = await getAdditionalArgs(textStrings, settings, onProgress);
 
         // additionalArgs.embeddings is a Record<string, number[]> where keys are original text
         // Handle both duplicate texts and ensure all items get embeddings

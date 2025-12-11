@@ -85,7 +85,16 @@ export async function vectorizeContent({ contentType, source, settings }) {
         // Step 4: Insert into vector store
         progressTracker.updateProgress(4, 'Embedding chunks...');
         const vecthareSettings = extension_settings.vecthare;
-        await insertVectorItems(collectionId, hashedChunks, vecthareSettings);
+        await insertVectorItems(collectionId, hashedChunks, vecthareSettings, (embedded, total) => {
+            // Update progress with embedding count
+            console.log(`[Content Vectorization] Embedding progress callback: ${embedded}/${total}`);
+            progressTracker.updateEmbeddingProgress(embedded, total);
+
+            // Determine phase based on progress (0-50% = Embedding, 50-100% = Writing)
+            const progressPercent = (embedded / total) * 100;
+            const phase = progressPercent <= 50 ? 'Embedding' : 'Writing to database';
+            progressTracker.updateCurrentItem(`${phase}: ${embedded}/${total} chunks (${total - embedded} remaining)`);
+        });
 
         // Save collection metadata
         setCollectionMeta(collectionId, {

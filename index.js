@@ -881,7 +881,7 @@ async function _getLegacySingleEmbedding(source, text, model, directories, req) 
         case 'koboldcpp': {
             // KoboldCpp uses OpenAI-compatible /v1/embeddings endpoint
             const apiUrl = req.body?.apiUrl || 'http://localhost:5001';
-            
+
             let url;
             try {
                 url = new URL(apiUrl);
@@ -1470,11 +1470,7 @@ async function getEmbeddingForSource(source, text, model, directories, req) {
         }
         case 'koboldcpp': {
             // KoboldCpp uses OpenAI-compatible /v1/embeddings endpoint
-            let apiUrl = req.body.apiUrl;
-            if (!apiUrl || typeof apiUrl !== 'string' || apiUrl.trim() === '') {
-                throw new Error('KoboldCpp: apiUrl is missing or invalid. Configure the embedding URL in VectHare settings.');
-            }
-            apiUrl = apiUrl.trim();
+            const apiUrl = req.body?.apiUrl || 'http://localhost:5001';
 
             let url;
             try {

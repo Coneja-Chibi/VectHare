@@ -39,6 +39,7 @@ import {
     getUrlProviders
 } from './providers.js';
 import { applyKeywordBoosts, getOverfetchAmount } from './keyword-boost.js';
+import { applyBM25Scoring } from './bm25-scorer.js';
 import AsyncUtils from '../utils/async-utils.js';
 import StringUtils from '../utils/string-utils.js';
 import {
@@ -757,22 +758,55 @@ export async function queryCollection(collectionId, searchText, topK, settings) 
         text: meta.text || ''
     }));
 
-    // Apply keyword boosts and trim to requested topK
-    const boostedResults = applyKeywordBoosts(resultsForBoost, searchText, topK);
+    let finalResults = scoreResults(resultsForBoost, searchText, topK, settings);
 
     // Convert back to expected format
     return {
-        hashes: boostedResults.map(r => r.hash),
-        metadata: boostedResults.map(r => ({
+        hashes: finalResults.map(r => r.hash),
+        metadata: finalResults.map(r => ({
             ...r.metadata,
             score: r.score,
-            originalScore: r.originalScore,
+            originalScore: r.originalScore || r.vectorScore,
             keywordBoost: r.keywordBoost,
+            bm25Score: r.bm25Score,
+            normalizedBM25: r.normalizedBM25,
+            vectorScore: r.vectorScore,
             matchedKeywords: r.matchedKeywords,
             matchedKeywordsWithWeights: r.matchedKeywordsWithWeights,
             keywordBoosted: r.keywordBoosted
         }))
     };
+}
+
+function scoreResults(resultsForBoost, searchText, topK, settings) {
+    let finalResults;
+
+     // Determine scoring method from settings
+    const scoringMethod = settings.keyword_scoring_method || 'keyword'; // 'keyword', 'bm25', or 'hybrid'
+    if (scoringMethod === 'bm25') {
+        // Use BM25 scoring only
+        const bm25Results = applyBM25Scoring(resultsForBoost, searchText, {
+            k1: settings.bm25_k1 || 1.5,
+            b: settings.bm25_b || 0.75,
+            alpha: 0.5,
+            beta: 0.5
+        });
+        finalResults = bm25Results.slice(0, topK);
+    } else if (scoringMethod === 'hybrid') {
+        // Use both keyword boost and BM25
+        const keywordBoosted = applyKeywordBoosts(resultsForBoost, searchText, overfetchAmount);
+        const hybridResults = applyBM25Scoring(keywordBoosted, searchText, {
+            k1: settings.bm25_k1 || 1.5,
+            b: settings.bm25_b || 0.75,
+            alpha: 0.6,
+            beta: 0.4
+        });
+        finalResults = hybridResults.slice(0, topK);
+    } else {
+        // Use traditional keyword boost (default)
+        finalResults = applyKeywordBoosts(resultsForBoost, searchText, topK);
+    }
+    return finalResults;
 }
 
 /**
@@ -804,7 +838,48 @@ export async function queryMultipleCollections(collectionIds, searchText, topK, 
         }
     }
 
-    return await backend.queryMultipleCollections(collectionIds, searchText, topK, threshold, settings, queryVector);
+    // Get raw results from backend (with overfetch for each collection)
+    const overfetchAmount = getOverfetchAmount(topK);
+    const rawResults = await backend.queryMultipleCollections(collectionIds, searchText, overfetchAmount, threshold, settings, queryVector);
+
+    // Apply scoring to each collection's results
+    const processedResults = {};
+
+    for (const [collectionId, collectionResults] of Object.entries(rawResults)) {
+        if (!collectionResults || !collectionResults.metadata) {
+            processedResults[collectionId] = collectionResults;
+            continue;
+        }
+
+        // Convert to format expected by scoring functions
+        const resultsForBoost = collectionResults.metadata.map((meta, idx) => ({
+            hash: collectionResults.hashes[idx],
+            score: meta.score || 0,
+            metadata: meta,
+            text: meta.text || ''
+        }));
+
+        let finalResults = scoreResults(resultsForBoost, searchText, topK, settings);
+
+        // Convert back to expected format
+        processedResults[collectionId] = {
+            hashes: finalResults.map(r => r.hash),
+            metadata: finalResults.map(r => ({
+                ...r.metadata,
+                score: r.score,
+                originalScore: r.originalScore || r.vectorScore,
+                keywordBoost: r.keywordBoost,
+                bm25Score: r.bm25Score,
+                normalizedBM25: r.normalizedBM25,
+                vectorScore: r.vectorScore,
+                matchedKeywords: r.matchedKeywords,
+                matchedKeywordsWithWeights: r.matchedKeywordsWithWeights,
+                keywordBoosted: r.keywordBoosted
+            }))
+        };
+    }
+
+    return processedResults;
 }
 
 /**

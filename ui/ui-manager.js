@@ -393,16 +393,49 @@ export function renderSettings(containerId, settings, callbacks) {
                             <input type="range" id="vecthare_score_threshold" class="vecthare-slider" min="0" max="1" step="0.05" />
                             <small class="vecthare_hint">Minimum relevance score for retrieval</small>
 
+                            <!-- Keyword Scoring Method -->
+                            <label style="margin-top: 16px;">
+                                <small>Keyword Scoring Method</small>
+                            </label>
+                            <select id="vecthare_keyword_scoring_method" class="vecthare-select">
+                                <option value="keyword">Keyword Boost</option>
+                                <option value="bm25">BM25 (Langchain)</option>
+                                <option value="hybrid">Hybrid (Both)</option>
+                            </select>
+                            <small class="vecthare_hint">Algorithm for keyword-based relevance scoring</small>
+
+                            <!-- BM25 Parameters (shown when BM25 or Hybrid is selected) -->
+                            <div id="vecthare_bm25_params" style="display: none; margin-top: 12px; padding: 12px; background: rgba(0,0,0,0.1); border-radius: 8px;">
+                                <label for="vecthare_bm25_k1">
+                                    <small>BM25 k1 (TF saturation): <span id="vecthare_bm25_k1_value">1.5</span></small>
+                                </label>
+                                <input type="range" id="vecthare_bm25_k1" class="vecthare-slider" min="0.5" max="3.0" step="0.1" />
+                                <small class="vecthare_hint">Controls term frequency saturation (1.2-2.0 typical)</small>
+
+                                <label for="vecthare_bm25_b" style="margin-top: 8px;">
+                                    <small>BM25 b (Length norm): <span id="vecthare_bm25_b_value">0.75</span></small>
+                                </label>
+                                <input type="range" id="vecthare_bm25_b" class="vecthare-slider" min="0" max="1" step="0.05" />
+                                <small class="vecthare_hint">Controls document length normalization (0.75 typical)</small>
+                            </div>
+
                             <label for="vecthare_query_depth" style="margin-top: 12px;">
                                 <small>Query Depth: <span id="vecthare_query_depth_value">2</span> messages</small>
                             </label>
                             <input type="range" id="vecthare_query_depth" class="vecthare-slider" min="1" max="20" step="1" />
+                            <small class="vecthare_hint">How many recent messages to include in search query</small>
+
+                            <label for="vecthare_deduplication_depth" style="margin-top: 12px;">
+                                <small>Dedup Depth: <span id="vecthare_deduplication_depth_value">50</span> messages</small>
+                            </label>
+                            <input type="range" id="vecthare_deduplication_depth" class="vecthare-slider" min="0" max="500" step="10" />
+                            <small class="vecthare_hint">Recent messages to check for duplicates (0 = check all, lower = allow older content to resurface)</small>
+
                             <div style="margin-top:8px; display:flex; gap:8px; align-items:center;">
                                 <label for="vecthare_topk" style="margin:0; white-space:nowrap;"><small>Top K</small></label>
                                 <input id="vecthare_topk" type="number" class="vecthare-input" min="1" style="width:90px;" />
                                 <small class="vecthare_hint" style="margin-left:8px;">Number of results to retrieve per collection</small>
                             </div>
-                            <small class="vecthare_hint">How many recent messages to include in search query</small>
 
                             <label style="margin-top: 16px;">
                                 <small>Injection Position</small>
@@ -1726,6 +1759,67 @@ function bindSettingsEvents(settings, callbacks) {
             saveSettingsDebounced();
         });
     $('#vecthare_threshold_value').text(settings.score_threshold.toFixed(2));
+
+    // Deduplication depth
+    $('#vecthare_deduplication_depth')
+        .val(settings.deduplication_depth ?? 50)
+        .on('input', function() {
+            const value = parseInt($(this).val());
+            const safeValue = isNaN(value) ? 50 : Math.max(0, value);
+            $('#vecthare_deduplication_depth_value').text(safeValue);
+            settings.deduplication_depth = safeValue;
+            Object.assign(extension_settings.vecthare, settings);
+            saveSettingsDebounced();
+        });
+    $('#vecthare_deduplication_depth_value').text(settings.deduplication_depth ?? 50);
+
+    // Keyword scoring method
+    $('#vecthare_keyword_scoring_method')
+        .val(settings.keyword_scoring_method || 'keyword')
+        .on('change', function() {
+            settings.keyword_scoring_method = String($(this).val());
+            Object.assign(extension_settings.vecthare, settings);
+            saveSettingsDebounced();
+
+            // Show/hide BM25 parameters
+            if (settings.keyword_scoring_method === 'bm25' || settings.keyword_scoring_method === 'hybrid') {
+                $('#vecthare_bm25_params').show();
+            } else {
+                $('#vecthare_bm25_params').hide();
+            }
+            console.log(`VectHare: Keyword scoring method changed to ${settings.keyword_scoring_method}`);
+        });
+
+    // Show/hide BM25 params based on initial setting
+    if (settings.keyword_scoring_method === 'bm25' || settings.keyword_scoring_method === 'hybrid') {
+        $('#vecthare_bm25_params').show();
+    }
+
+    // BM25 k1 parameter
+    $('#vecthare_bm25_k1')
+        .val(settings.bm25_k1 || 1.5)
+        .on('input', function() {
+            const value = parseFloat($(this).val());
+            const safeValue = isNaN(value) ? 1.5 : value;
+            $('#vecthare_bm25_k1_value').text(safeValue.toFixed(1));
+            settings.bm25_k1 = safeValue;
+            Object.assign(extension_settings.vecthare, settings);
+            saveSettingsDebounced();
+        });
+    $('#vecthare_bm25_k1_value').text((settings.bm25_k1 || 1.5).toFixed(1));
+
+    // BM25 b parameter
+    $('#vecthare_bm25_b')
+        .val(settings.bm25_b || 0.75)
+        .on('input', function() {
+            const value = parseFloat($(this).val());
+            const safeValue = isNaN(value) ? 0.75 : value;
+            $('#vecthare_bm25_b_value').text(safeValue.toFixed(2));
+            settings.bm25_b = safeValue;
+            Object.assign(extension_settings.vecthare, settings);
+            saveSettingsDebounced();
+        });
+    $('#vecthare_bm25_b_value').text((settings.bm25_b || 0.75).toFixed(2));
 
     // Query depth (how many recent messages to include in search query)
     $('#vecthare_query_depth')

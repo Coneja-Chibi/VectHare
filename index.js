@@ -90,6 +90,16 @@ const defaultSettings = {
     chunk_size: 500, // For adaptive strategy only
     score_threshold: 0.25,
 
+    // Deduplication settings
+    deduplication_depth: 50, // Number of recent messages to check for duplicates (0 = check all)
+
+    // Keyword scoring method
+    keyword_scoring_method: 'keyword', // 'keyword', 'bm25', or 'hybrid'
+
+    // BM25 parameters
+    bm25_k1: 1.5,  // Term frequency saturation (1.2-2.0 typical)
+    bm25_b: 0.75,  // Length normalization (0-1, 0.75 typical)
+
     // Advanced features
     temporal_decay: getDefaultDecaySettings(),
 

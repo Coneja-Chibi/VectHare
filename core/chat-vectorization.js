@@ -1178,37 +1178,80 @@ async function applyGroupsAndLinksStage(chunks, activeCollections, settings, deb
 
 /**
  * Stage 7: Deduplicate chunks already in chat context
+ * Only checks against recent messages within the context window, not entire chat history.
  * @param {object[]} chunks Chunks to deduplicate
  * @param {object[]} chat Current chat messages
+ * @param {object} settings VectHare settings (uses deduplication_depth)
  * @param {object} debugData Debug tracking object
  * @returns {{toInject: object[], skipped: object[]}} Chunks to inject and skipped duplicates
  */
-function deduplicateChunks(chunks, chat, debugData) {
+function deduplicateChunks(chunks, chat, settings, debugData) {
+    // Determine how far back to check for duplicates
+    // Default to 50 messages if not specified (reasonable context window)
+    const deduplicationDepth = settings.deduplication_depth ?? 50;
+
     addTrace(debugData, 'injection', 'Starting deduplication and injection', {
         chunksToInject: chunks.length,
-        chatLength: chat.length
+        chatLength: chat.length,
+        deduplicationDepth: deduplicationDepth
     });
+
+    // Only check the most recent N messages (within context window)
+    const recentMessages = deduplicationDepth > 0 && deduplicationDepth < chat.length
+        ? chat.slice(-deduplicationDepth)
+        : chat;
+
+    console.log(`[VectHare Dedup] Building hash set from ${recentMessages.length} recent messages (depth: ${deduplicationDepth})`);
+    console.log(`[VectHare Dedup] Total chat length: ${chat.length}, checking duplicates in last ${recentMessages.length} messages`);
 
     // Build set of hashes currently in chat context
     const currentChatHashes = new Set();
-    chat.forEach((msg) => {
+    const chatHashMap = new Map(); // For debugging: hash -> message preview
+
+    recentMessages.forEach((msg, idx) => {
         if (msg.mes) {
-            const hash = getStringHash(substituteParams(getTextWithoutAttachments(msg)));
+            const cleanedText = substituteParams(getTextWithoutAttachments(msg));
+            const hash = getStringHash(cleanedText);
             currentChatHashes.add(hash);
+
+            // Store sample for debugging (first occurrence only)
+            // Calculate absolute index in full chat
+            const absoluteIndex = chat.length - recentMessages.length + idx;
+            if (!chatHashMap.has(hash)) {
+                chatHashMap.set(hash, {
+                    index: absoluteIndex,
+                    preview: cleanedText.substring(0, 80),
+                    isUser: msg.is_user,
+                    name: msg.name
+                });
+            }
         }
     });
+
+    console.log(`[VectHare Dedup] Built hash set with ${currentChatHashes.size} unique message hashes from recent context`);
 
     const toInject = [];
     const skipped = [];
 
     for (const chunk of chunks) {
-        if (currentChatHashes.has(chunk.hash)) {
+        const isInChat = currentChatHashes.has(chunk.hash);
+
+        if (isInChat) {
+            const matchedMsg = chatHashMap.get(chunk.hash);
+            console.debug(`[VectHare Dedup] ❌ SKIPPING chunk (hash: ${chunk.hash})`);
+            console.debug(`  Chunk text: "${chunk.text?.substring(0, 80)}..."`);
+            console.debug(`  Matches chat message #${matchedMsg.index} from ${matchedMsg.name}: "${matchedMsg.preview}..."`);
+            console.debug(`  Score: ${chunk.score?.toFixed(4)}, Collection: ${chunk.collectionId}`);
+
             skipped.push(chunk);
             recordChunkFate(debugData, chunk.hash, 'injection', 'skipped',
                 'Already in current chat context - no injection needed',
                 { score: chunk.score }
             );
         } else {
+            console.debug(`[VectHare Dedup] ✅ KEEPING chunk (hash: ${chunk.hash}, score: ${chunk.score?.toFixed(4)})`);
+            console.debug(`  Text: "${chunk.text?.substring(0, 80)}..."`);
+
             toInject.push(chunk);
             recordChunkFate(debugData, chunk.hash, 'injection', 'passed',
                 'Not in current context - will inject',
@@ -1222,6 +1265,8 @@ function deduplicateChunks(chunks, chat, debugData) {
         toInject: toInject.length,
         skippedDuplicates: skipped.length
     });
+
+    console.log(`[VectHare Dedup] FINAL: ${toInject.length} will inject, ${skipped.length} skipped as duplicates`);
 
     return { toInject, skipped };
 }
@@ -1622,11 +1667,23 @@ export async function rearrangeChat(chat, settings, type) {
         console.log(`VectHare: Stored ${chunks.length} chunks for visualizer`);
 
         // === STAGE 9: Deduplicate ===
-        const { toInject: chunksToInject, skipped: skippedDuplicates } = deduplicateChunks(chunks, chat, debugData);
+        console.log(`[VectHare Deduplication] Starting with ${chunks.length} chunks before deduplication`);
+        console.log(`[VectHare Deduplication] Current chat has ${chat.length} messages`);
+
+        const { toInject: chunksToInject, skipped: skippedDuplicates } = deduplicateChunks(chunks, chat, settings, debugData);
+
+        console.log(`[VectHare Deduplication] After deduplication: ${chunksToInject.length} to inject, ${skippedDuplicates.length} skipped`);
+        if (skippedDuplicates.length > 0) {
+            console.log(`[VectHare Deduplication] Skipped chunks (already in chat):`);
+            skippedDuplicates.forEach((chunk, idx) => {
+                console.log(`  [${idx + 1}] Hash: ${chunk.hash}, Score: ${chunk.score?.toFixed(4)}, Text: "${chunk.text?.substring(0, 80)}..."`);
+            });
+        }
 
         if (chunksToInject.length === 0) {
             console.log('ℹ️ VectHare: All retrieved chunks already in context, nothing to inject');
             console.log(`   ${skippedDuplicates.length} chunks were skipped (already in current chat)`);
+            console.info('[VectHare] Injection blocked: All retrieved chunks are already present in the current chat context. Adjust temporal decay or query depth if you want older messages.');
             debugData.stages.injected = [];
             debugData.stats.actuallyInjected = 0;
             debugData.stats.skippedDuplicates = skippedDuplicates.length;
@@ -1637,6 +1694,8 @@ export async function rearrangeChat(chat, settings, type) {
             setLastSearchDebug(debugData);
             return;
         }
+
+        console.log(`[VectHare Deduplication] ✅ ${chunksToInject.length} chunks will proceed to injection`);
 
         // === STAGE 10: Inject into prompt ===
         const injection = injectChunksIntoPrompt(chunksToInject, settings, debugData);

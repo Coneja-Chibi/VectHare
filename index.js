@@ -866,7 +866,9 @@ async function _getLegacySingleEmbedding(source, text, model, directories, req) 
         case 'electronhub':
         case 'openrouter': {
             const { getOpenAIVector } = await import('../../src/vectors/openai-vectors.js');
-            return await getOpenAIVector(text, source, directories, model);
+            // ElectronHub requires a model name, provide default if empty
+            const effectiveModel = (source === 'electronhub' && !model) ? 'text-embedding-ada-002' : model;
+            return await getOpenAIVector(text, source, directories, effectiveModel);
         }
         case 'nomicai': {
             const { getNomicAIVector } = await import('../../src/vectors/nomicai-vectors.js');
@@ -875,6 +877,46 @@ async function _getLegacySingleEmbedding(source, text, model, directories, req) 
         case 'cohere': {
             const { getCohereVector } = await import('../../src/vectors/cohere-vectors.js');
             return await getCohereVector(text, true, directories, model);
+        }
+        case 'koboldcpp': {
+            // KoboldCpp uses OpenAI-compatible /v1/embeddings endpoint
+            const apiUrl = req.body?.apiUrl || 'http://localhost:5001';
+            
+            let url;
+            try {
+                url = new URL(apiUrl);
+                // Ensure we're hitting the embeddings endpoint
+                if (!url.pathname.includes('/embeddings')) {
+                    url.pathname = url.pathname.replace(/\/?$/, '/v1/embeddings').replace(/\/+/g, '/');
+                }
+            } catch (e) {
+                throw new Error(`KoboldCpp: Invalid URL format "${apiUrl}" - ${e.message}`);
+            }
+
+            const response = await fetch(url.toString(), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    input: text,
+                    model: model || 'koboldcpp',
+                }),
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`KoboldCpp: ${response.status} ${response.statusText} - ${errorText}`);
+            }
+
+            const data = await response.json();
+            // OpenAI format: { data: [{ embedding: [...] }] }
+            if (data?.data?.[0]?.embedding) {
+                return data.data[0].embedding;
+            }
+            // Fallback: direct embedding array
+            if (Array.isArray(data?.embedding)) {
+                return data.embedding;
+            }
+            throw new Error('KoboldCpp: Invalid response format - no embedding found');
         }
         case 'ollama': {
             const { getOllamaVector } = await import('../../src/vectors/ollama-vectors.js');
@@ -1422,7 +1464,9 @@ async function getEmbeddingForSource(source, text, model, directories, req) {
         case 'electronhub':
         case 'openrouter': {
             const { getOpenAIVector } = await import('../../src/vectors/openai-vectors.js');
-            return await getOpenAIVector(text, source, directories, model);
+            // ElectronHub requires a model name, provide default if empty
+            const effectiveModel = (source === 'electronhub' && !model) ? 'text-embedding-ada-002' : model;
+            return await getOpenAIVector(text, source, directories, effectiveModel);
         }
         case 'koboldcpp': {
             // KoboldCpp uses OpenAI-compatible /v1/embeddings endpoint
@@ -1478,11 +1522,14 @@ async function getEmbeddingForSource(source, text, model, directories, req) {
         }
         case 'ollama': {
             const { getOllamaVector } = await import('../../src/vectors/ollama-vectors.js');
-            return await getOllamaVector(text, req.body.apiUrl, model, req.body.keep, directories);
+            const apiUrl = req.body?.apiUrl || 'http://localhost:11434';
+            const keep = req.body?.keep || false;
+            return await getOllamaVector(text, apiUrl, model, keep, directories);
         }
         case 'llamacpp': {
             const { getLlamaCppVector } = await import('../../src/vectors/llamacpp-vectors.js');
-            return await getLlamaCppVector(text, req.body.apiUrl, directories);
+            const apiUrl = req.body?.apiUrl || 'http://localhost:8080';
+            return await getLlamaCppVector(text, apiUrl, directories);
         }
         case 'bananabread': {
             // BananaBread llama.cpp-compatible endpoint (no model param needed - uses server config)
@@ -1527,7 +1574,8 @@ async function getEmbeddingForSource(source, text, model, directories, req) {
         }
         case 'vllm': {
             const { getVllmVector } = await import('../../src/vectors/vllm-vectors.js');
-            return await getVllmVector(text, req.body.apiUrl, model, directories);
+            const apiUrl = req.body?.apiUrl || 'http://localhost:8000';
+            return await getVllmVector(text, apiUrl, model, directories);
         }
         case 'palm':
         case 'vertexai': {
@@ -1540,7 +1588,9 @@ async function getEmbeddingForSource(source, text, model, directories, req) {
         }
         case 'extras': {
             const { getExtrasVector } = await import('../../src/vectors/extras-vectors.js');
-            return await getExtrasVector(text, req.body.extrasUrl, req.body.extrasKey);
+            const extrasUrl = req.body?.extrasUrl || 'http://localhost:5100';
+            const extrasKey = req.body?.extrasKey || '';
+            return await getExtrasVector(text, extrasUrl, extrasKey);
         }
         default:
             throw new Error(`Unknown vector source: ${source}`);

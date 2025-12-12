@@ -6,7 +6,7 @@
  * Backend: Qdrant (external vector database server)
  *
  * COLLECTION STRATEGY (configurable via settings.qdrant_multitenancy):
- * 
+ *
  * MULTITENANCY MODE (qdrant_multitenancy = true):
  * - Uses a single shared collection: "vecthare_multitenancy"
  * - Adds content_type metadata field to distinguish different sources
@@ -60,12 +60,24 @@ function getActualCollectionId(collectionId, settings) {
 export class QdrantBackend extends VectorBackend {
     async initialize(settings) {
         // Get Qdrant config from settings
-        const config = {
-            host: settings.qdrant_host || 'localhost',
-            port: settings.qdrant_port || 6333,
-            url: settings.qdrant_url || null,
-            apiKey: settings.qdrant_api_key || null,
-        };
+        // Only send relevant config based on cloud vs local mode
+        let config;
+        
+        if (settings.qdrant_use_cloud) {
+            // Cloud mode: use URL and API key
+            config = {
+                url: settings.qdrant_url || null,
+                apiKey: settings.qdrant_api_key || null,
+            };
+            console.log('VectHare: Initializing Qdrant Cloud:', config.url);
+        } else {
+            // Local mode: use host and port
+            config = {
+                host: settings.qdrant_host || 'localhost',
+                port: settings.qdrant_port || 6333,
+            };
+            console.log('VectHare: Initializing local Qdrant:', `${config.host}:${config.port}`);
+        }
 
         const response = await fetch('/api/plugins/similharity/backend/init/qdrant', {
             method: 'POST',
@@ -177,7 +189,7 @@ export class QdrantBackend extends VectorBackend {
     async getSavedHashes(collectionId, settings) {
         const strippedCollectionId = this._stripRegistryPrefix(collectionId);
         const actualCollectionId = getActualCollectionId(strippedCollectionId, settings);
-        
+
         const body = {
             backend: BACKEND_TYPE,
             collectionId: actualCollectionId,
@@ -265,6 +277,24 @@ export class QdrantBackend extends VectorBackend {
 
         if (!response.ok) {
             const errorBody = await response.text().catch(() => 'No response body');
+
+            // Check for dimension mismatch error
+            if (errorBody.includes('Vector dimension error') || errorBody.includes('dimension')) {
+                const dimensionMatch = errorBody.match(/expected dim: (\d+), got (\d+)/);
+                if (dimensionMatch) {
+                    const expectedDim = dimensionMatch[1];
+                    const gotDim = dimensionMatch[2];
+                    throw new Error(
+                        `[Qdrant] Vector dimension mismatch: Collection "${actualCollectionId}" expects ${expectedDim}-dimensional vectors, but received ${gotDim}-dimensional vectors. ` +
+                        `This happens when switching embedding models. Solution: Delete the collection in Database Browser or use Qdrant API to drop it, then re-vectorize.`
+                    );
+                }
+                throw new Error(
+                    `[Qdrant] Vector dimension mismatch in collection "${actualCollectionId}". ` +
+                    `This typically means you switched embedding models. Solution: Delete the collection and re-vectorize. Error: ${errorBody}`
+                );
+            }
+
             throw new Error(`[Qdrant] Failed to insert ${items.length} vectors into ${actualCollectionId}: ${response.status} ${response.statusText} - ${errorBody}`);
         }
 
@@ -275,7 +305,7 @@ export class QdrantBackend extends VectorBackend {
     async deleteVectorItems(collectionId, hashes, settings) {
         const strippedCollectionId = this._stripRegistryPrefix(collectionId);
         const actualCollectionId = getActualCollectionId(strippedCollectionId, settings);
-        
+
         const body = {
             backend: BACKEND_TYPE,
             collectionId: actualCollectionId,
@@ -308,7 +338,7 @@ export class QdrantBackend extends VectorBackend {
     async queryCollection(collectionId, searchText, topK, settings, queryVector = null) {
         const strippedCollectionId = this._stripRegistryPrefix(collectionId);
         const actualCollectionId = getActualCollectionId(strippedCollectionId, settings);
-        
+
         const body = {
             backend: BACKEND_TYPE,
             collectionId: actualCollectionId,
@@ -360,7 +390,7 @@ export class QdrantBackend extends VectorBackend {
             try {
                 const strippedCollectionId = this._stripRegistryPrefix(collectionId);
                 const actualCollectionId = getActualCollectionId(strippedCollectionId, settings);
-                
+
                 const body = {
                     backend: BACKEND_TYPE,
                     collectionId: actualCollectionId,

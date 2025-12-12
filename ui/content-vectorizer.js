@@ -2479,7 +2479,19 @@ async function startVectorization() {
 
     } catch (e) {
         console.error('VectHare: Vectorization failed:', e);
-        toastr.error('Vectorization failed: ' + e.message);
+
+        // Check for dimension mismatch error and provide helpful guidance
+        if (e.message.includes('dimension mismatch') || e.message.includes('Vector dimension error')) {
+            toastr.error(
+                'Vector dimension mismatch detected. You likely switched embedding models. ' +
+                'Please delete this collection in Database Browser and try again.',
+                'VectHare - Dimension Mismatch',
+                { timeOut: 10000 }
+            );
+        } else {
+            toastr.error('Vectorization failed: ' + e.message, 'VectHare');
+        }
+
         btn.prop('disabled', false).html('<i class="fa-solid fa-bolt"></i> Vectorize');
     }
 }

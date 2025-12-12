@@ -613,9 +613,10 @@ export async function insertVectorItems(collectionId, items, settings, onProgres
     // Sources that require client-side embedding generation
     const clientSideEmbeddingSources = ['webllm', 'koboldcpp', 'bananabread'];
 
-    // If source requires client-side embeddings, generate them and attach to items
+    // If source requires client-side embeddings, use streaming approach
     if (clientSideEmbeddingSources.includes(settings.source)) {
-        console.log(`VectHare: Generating client-side embeddings for ${settings.source}...`);
+        console.log(`VectHare: Streaming embeddings and writing for ${settings.source}...`);
+
         // Extract text strings - getAdditionalArgs expects string[], not objects
         const textStrings = items.map(item => {
             const text = item.text || item;
@@ -623,86 +624,115 @@ export async function insertVectorItems(collectionId, items, settings, onProgres
             return typeof text === 'string' && text.trim().length > 0 ? text : ' ';
         });
 
-        // Embedding phase: 0-50% of total progress
-        const embeddingProgressCallback = onProgress ? (embedded, total) => {
-            const progressPercent = (embedded / total) * 0.5; // Scale to 0-50%
-            const scaledEmbedded = Math.round(progressPercent * items.length);
-            console.log(`[Core Vector API] Embedding phase: ${embedded}/${total} -> ${scaledEmbedded}/${items.length} (${Math.round(progressPercent * 100)}%)`);
-            onProgress(scaledEmbedded, items.length);
-        } : null;
+        // Use streaming embedding generation with immediate writes
+        await streamEmbeddingsAndWrite(backend, collectionId, items, textStrings, settings, onProgress);
+    } else {
+        // Server-side embeddings - backend handles everything
+        // If rate limiting is enabled, batch execution
+        if (settings.rate_limit_calls > 0) {
+            // Batch size depends on provider - some need smaller batches
+            // Ollama and Transformers work best with batch size of 1 (like Stock ST)
+            const smallBatchProviders = ['transformers', 'ollama'];
+            const BATCH_SIZE = smallBatchProviders.includes(settings.source) ? 1 : 10;
+            const batches = chunkArray(items, BATCH_SIZE);
 
-        const additionalArgs = await getAdditionalArgs(textStrings, settings, embeddingProgressCallback);
+            console.log(`VectHare: Processing ${items.length} items in ${batches.length} batches with rate limit (Max ${settings.rate_limit_calls} calls / ${settings.rate_limit_interval}s)`);
 
-        // additionalArgs.embeddings is a Record<string, number[]> where keys are original text
-        // Handle both duplicate texts and ensure all items get embeddings
-        if (additionalArgs.embeddings) {
-            let missingEmbeddings = 0;
-            // Attach embeddings to items as .vector property
-            for (let i = 0; i < items.length; i++) {
-                const text = textStrings[i];
-                const embedding = additionalArgs.embeddings[text];
-                if (embedding && Array.isArray(embedding) && embedding.length > 0) {
-                    // Ensure all embedding values are numbers (not objects or undefined)
-                    const isValidEmbedding = embedding.every(val => typeof val === 'number' && !isNaN(val));
-                    if (!isValidEmbedding) {
-                        console.error(`VectHare: Invalid embedding values for item ${i}:`, embedding.slice(0, 5));
-                        missingEmbeddings++;
-                        continue;
-                    }
-                    items[i].vector = embedding;
-                } else {
-                    missingEmbeddings++;
-                    console.warn(`VectHare: No embedding found for item ${i}, text: "${text.substring(0, 50)}..."`);
+            for (let i = 0; i < batches.length; i++) {
+                await dynamicRateLimiter.execute(async () => {
+                    await AsyncUtils.retry(async () => {
+                        await backend.insertVectorItems(collectionId, batches[i], settings);
+                    }, RETRY_CONFIG);
+                }, settings);
+
+                if (onProgress) {
+                    const embeddedCount = (i + 1) * BATCH_SIZE;
+                    const actualEmbedded = Math.min(embeddedCount, items.length);
+                    onProgress(actualEmbedded, items.length);
                 }
             }
-
-            if (missingEmbeddings > 0) {
-                throw new Error(`VectHare: Failed to generate embeddings for ${settings.source} - ${missingEmbeddings} items missing embeddings`);
-            }
-
-            console.log(`VectHare: Attached ${items.length} embeddings to items`);
         } else {
-            throw new Error(`VectHare: No embeddings returned from ${settings.source}`);
-        }
-    }
+            // No rate limit - execute all at once (backend handles it)
+            await backend.insertVectorItems(collectionId, items, settings);
 
-    // If rate limiting is enabled, batch execution
-    if (settings.rate_limit_calls > 0) {
-        // Batch size depends on provider - some need smaller batches
-        // Ollama and Transformers work best with batch size of 1 (like Stock ST)
-        const smallBatchProviders = ['transformers', 'ollama'];
-        const BATCH_SIZE = smallBatchProviders.includes(settings.source) ? 1 : 10;
-        const batches = chunkArray(items, BATCH_SIZE);
-
-        console.log(`VectHare: Processing ${items.length} items in ${batches.length} batches with rate limit (Max ${settings.rate_limit_calls} calls / ${settings.rate_limit_interval}s)`);
-
-        for (let i = 0; i < batches.length; i++) {
-            await dynamicRateLimiter.execute(async () => {
-                await AsyncUtils.retry(async () => {
-                    await backend.insertVectorItems(collectionId, batches[i], settings);
-                }, RETRY_CONFIG);
-            }, settings);
-
-            // Writing phase: 50-100% of total progress
             if (onProgress) {
-                const embeddedCount = (i + 1) * BATCH_SIZE;
-                const actualEmbedded = Math.min(embeddedCount, items.length);
-                const progressPercent = 0.5 + ((actualEmbedded / items.length) * 0.5); // Scale to 50-100%
-                const scaledEmbedded = Math.floor(items.length * 0.5) + Math.round((actualEmbedded / items.length) * items.length * 0.5);
-                console.log(`[Core Vector API] Writing phase: ${actualEmbedded}/${items.length} -> ${scaledEmbedded}/${items.length} (${Math.round(progressPercent * 100)}%)`);
-                onProgress(scaledEmbedded, items.length);
+                onProgress(items.length, items.length);
             }
         }
-    } else {
-        // No rate limit - execute all at once (backend handles it)
-        await backend.insertVectorItems(collectionId, items, settings);
+    }
+}
 
-        // Call progress callback at 100% completion for non-batched execution
+/**
+ * Stream embeddings and write to database as batches complete
+ * @param {object} backend - The backend instance
+ * @param {string} collectionId - Collection ID
+ * @param {Array} items - Original items
+ * @param {string[]} textStrings - Text strings extracted from items
+ * @param {object} settings - Settings object
+ * @param {Function} onProgress - Progress callback
+ */
+async function streamEmbeddingsAndWrite(backend, collectionId, items, textStrings, settings, onProgress) {
+    const EMBEDDING_BATCH_SIZE = 10; // Batch size for embedding generation
+    const embeddingsMap = /** @type {Record<string, number[]>} */ ({});
+    let totalProcessed = 0;
+
+    // Process embeddings in batches
+    for (let i = 0; i < textStrings.length; i += EMBEDDING_BATCH_SIZE) {
+        const batchEnd = Math.min(i + EMBEDDING_BATCH_SIZE, textStrings.length);
+        const batchTextStrings = textStrings.slice(i, batchEnd);
+        const batchItems = items.slice(i, batchEnd);
+
+        console.log(`VectHare: Embedding batch ${Math.floor(i / EMBEDDING_BATCH_SIZE) + 1}/${Math.ceil(textStrings.length / EMBEDDING_BATCH_SIZE)} (items ${i + 1}-${batchEnd})`);
+
+        // Generate embeddings for this batch
+        const additionalArgs = await getAdditionalArgs(batchTextStrings, settings);
+
+        if (!additionalArgs.embeddings) {
+            throw new Error(`VectHare: No embeddings returned from ${settings.source} for batch ${i / EMBEDDING_BATCH_SIZE + 1}`);
+        }
+
+        // Attach embeddings to items and validate
+        let missingEmbeddings = 0;
+        const itemsToWrite = [];
+
+        for (let j = 0; j < batchItems.length; j++) {
+            const text = batchTextStrings[j];
+            const embedding = additionalArgs.embeddings[text];
+
+            if (embedding && Array.isArray(embedding) && embedding.length > 0) {
+                // Validate embedding values
+                const isValidEmbedding = embedding.every(val => typeof val === 'number' && !isNaN(val));
+                if (!isValidEmbedding) {
+                    console.error(`VectHare: Invalid embedding values for item ${i + j}:`, embedding.slice(0, 5));
+                    missingEmbeddings++;
+                    continue;
+                }
+                batchItems[j].vector = embedding;
+                itemsToWrite.push(batchItems[j]);
+            } else {
+                missingEmbeddings++;
+                console.warn(`VectHare: No embedding found for item ${i + j}, text: "${text.substring(0, 50)}..."`);
+            }
+        }
+
+        if (missingEmbeddings > 0) {
+            throw new Error(`VectHare: Failed to generate embeddings for ${settings.source} - ${missingEmbeddings} items missing in batch`);
+        }
+
+        // Write this batch to database immediately
+        console.log(`VectHare: Writing batch ${Math.floor(i / EMBEDDING_BATCH_SIZE) + 1} to database (${itemsToWrite.length} items)`);
+        await backend.insertVectorItems(collectionId, itemsToWrite, settings);
+
+        totalProcessed += itemsToWrite.length;
+
+        // Update progress
         if (onProgress) {
-            console.log(`[Core Vector API] Non-batched completion: ${items.length}/${items.length} (100%)`);
-            onProgress(items.length, items.length);
+            console.log(`[Core Vector API] Streamed ${totalProcessed}/${items.length} (${Math.round((totalProcessed / items.length) * 100)}%)`);
+            onProgress(totalProcessed, items.length);
         }
     }
+
+    console.log(`VectHare: Completed streaming ${totalProcessed} items to database`);
 }
 
 /**

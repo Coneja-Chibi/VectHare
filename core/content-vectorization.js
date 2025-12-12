@@ -82,18 +82,16 @@ export async function vectorizeContent({ contentType, source, settings }) {
             hash: getStringHash(chunk.text),
         }));
 
-        // Step 4: Insert into vector store
-        progressTracker.updateProgress(4, 'Embedding chunks...');
+        // Step 4: Insert into vector store (streaming: embed + write together)
+        progressTracker.updateProgress(4, 'Processing chunks...');
         const vecthareSettings = extension_settings.vecthare;
         await insertVectorItems(collectionId, hashedChunks, vecthareSettings, (embedded, total) => {
-            // Update progress with embedding count
-            console.log(`[Content Vectorization] Embedding progress callback: ${embedded}/${total}`);
+            // Update progress with streaming count
+            console.log(`[Content Vectorization] Processing progress callback: ${embedded}/${total}`);
             progressTracker.updateEmbeddingProgress(embedded, total);
 
-            // Determine phase based on progress (0-50% = Embedding, 50-100% = Writing)
-            const progressPercent = (embedded / total) * 100;
-            const phase = progressPercent <= 50 ? 'Embedding' : 'Writing to database';
-            progressTracker.updateCurrentItem(`${phase}: ${embedded}/${total} chunks (${total - embedded} remaining)`);
+            // Streaming approach: embedding and writing happen together
+            progressTracker.updateCurrentItem(`Processing: ${embedded}/${total} chunks (${total - embedded} remaining)`);
         });
 
         // Save collection metadata

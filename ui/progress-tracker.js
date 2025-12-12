@@ -331,12 +331,10 @@ export class ProgressTracker {
         if (this.stats.processedItems === 0) {
             return 'Starting...';
         } else if (this.stats.totalChunksToEmbed > 0 && this.stats.embeddedChunks >= 0) {
-            // When embedding progress is tracked, show phase-specific status
+            // Streaming approach: embedding and writing happen together
             const progressPercent = (this.stats.embeddedChunks / this.stats.totalChunksToEmbed) * 100;
-            if (progressPercent <= 50) {
-                return 'Embedding chunks...';
-            } else if (progressPercent < 100) {
-                return 'Writing to database...';
+            if (progressPercent < 100) {
+                return 'Processing chunks...';
             } else {
                 return 'Finalizing...';
             }

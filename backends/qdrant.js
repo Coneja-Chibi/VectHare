@@ -239,51 +239,66 @@ export class QdrantBackend extends VectorBackend {
         const strippedCollectionId = this._stripRegistryPrefix(collectionId);
         const actualCollectionId = getActualCollectionId(strippedCollectionId, settings);
 
-        const response = await fetch('/api/plugins/similharity/chunks/insert', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-            body: JSON.stringify({
-                backend: BACKEND_TYPE,
-                collectionId: actualCollectionId,
-                items: items.map(item => {
-                    // Include keywords in the text for embedding/indexing
-                    let textWithKeywords = item.text || '';
-                    if (item.keywords && item.keywords.length > 0) {
-                        const keywordTexts = item.keywords.map(kw => kw.text || kw).join(' ');
-                        textWithKeywords += ` [KEYWORDS: ${keywordTexts}]`;
-                    }
+        // Batch items to avoid exceeding Qdrant's 32MB payload limit
+        // Qdrant's default limit is 33554432 bytes (32MB)
+        const BATCH_SIZE = 100; // Conservative batch size to stay well under limit
+        const batches = [];
+        for (let i = 0; i < items.length; i += BATCH_SIZE) {
+            batches.push(items.slice(i, i + BATCH_SIZE));
+        }
 
-                    const metadata = {
-                        ...item.metadata,
-                        // Pass through VectHare-specific fields
-                        importance: item.importance,
-                        keywords: item.keywords,
-                        customWeights: item.customWeights,
-                        disabledKeywords: item.disabledKeywords,
-                        chunkGroup: item.chunkGroup,
-                        conditions: item.conditions,
-                        summary: item.summary,
-                        isSummaryChunk: item.isSummaryChunk,
-                        parentHash: item.parentHash,
-                    };
+        console.log(`VectHare Qdrant: Inserting ${items.length} vectors in ${batches.length} batch(es) of up to ${BATCH_SIZE} items`);
 
-                    // Add content_type for multitenancy mode
-                    if (settings.qdrant_multitenancy) {
-                        metadata.content_type = strippedCollectionId;
-                    }
+        // Process each batch
+        for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+            const batch = batches[batchIndex];
+            const batchNum = batchIndex + 1;
 
-                    return {
-                        hash: item.hash,
-                        text: textWithKeywords,
-                        index: item.index,
-                        vector: item.vector,
-                        metadata,
-                    };
+            const response = await fetch('/api/plugins/similharity/chunks/insert', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                body: JSON.stringify({
+                    backend: BACKEND_TYPE,
+                    collectionId: actualCollectionId,
+                    items: batch.map(item => {
+                        // Include keywords in the text for embedding/indexing
+                        let textWithKeywords = item.text || '';
+                        if (item.keywords && item.keywords.length > 0) {
+                            const keywordTexts = item.keywords.map(kw => kw.text || kw).join(' ');
+                            textWithKeywords += ` [KEYWORDS: ${keywordTexts}]`;
+                        }
+
+                        const metadata = {
+                            ...item.metadata,
+                            // Pass through VectHare-specific fields
+                            importance: item.importance,
+                            keywords: item.keywords,
+                            customWeights: item.customWeights,
+                            disabledKeywords: item.disabledKeywords,
+                            chunkGroup: item.chunkGroup,
+                            conditions: item.conditions,
+                            summary: item.summary,
+                            isSummaryChunk: item.isSummaryChunk,
+                            parentHash: item.parentHash,
+                        };
+
+                        // Add content_type for multitenancy mode
+                        if (settings.qdrant_multitenancy) {
+                            metadata.content_type = strippedCollectionId;
+                        }
+
+                        return {
+                            hash: item.hash,
+                            text: textWithKeywords,
+                            index: item.index,
+                            vector: item.vector,
+                            metadata,
+                        };
+                    }),
+                    source: settings.source || 'transformers',
+                    model: getModelFromSettings(settings),
                 }),
-                source: settings.source || 'transformers',
-                model: getModelFromSettings(settings),
-            }),
-        });
+            });
 
         if (!response.ok) {
             const errorBody = await response.text().catch(() => 'No response body');
@@ -306,6 +321,15 @@ export class QdrantBackend extends VectorBackend {
             }
 
             throw new Error(`[Qdrant] Failed to insert ${items.length} vectors into ${actualCollectionId}: ${response.status} ${response.statusText} - ${errorBody}`);
+        }
+
+        // Register the collection after successful insert
+        try {
+            // Dynamic import to avoid circular dependency
+            const { registerCollection } = await import('../core/collection-loader.js');
+            registerCollection(collectionId);
+        } catch (e) {
+            console.warn('VectHare: Failed to register collection after Qdrant insert:', e);
         }
 
         const mode = settings.qdrant_multitenancy ? 'multitenancy' : 'separate';

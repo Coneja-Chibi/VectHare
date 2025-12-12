@@ -1163,16 +1163,20 @@ function bindCollectionCardEvents() {
         };
 
         // Use unified plugin endpoint
+        const requestBody = {
+          backend: collection.backend || "vectra",
+          collectionId: collection.id,
+          source: collection.source || "transformers",
+          model: collection.model || "",
+          limit: 1000, // Get first 1000 chunks
+        };
+
+        console.log("VectHare DB Browser: Requesting chunks with:", requestBody);
+
         const response = await fetch("/api/plugins/similharity/chunks/list", {
           method: "POST",
           headers: getRequestHeaders(),
-          body: JSON.stringify({
-            backend: collection.backend || "vectra",
-            collectionId: collection.id,
-            source: collection.source || "transformers",
-            model: collection.model || "",
-            limit: 1000, // Get first 1000 chunks
-          }),
+          body: JSON.stringify(requestBody),
         });
 
         if (!response.ok) {

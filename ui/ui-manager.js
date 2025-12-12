@@ -969,6 +969,7 @@ async function executeDiagnostics() {
 
         // Filter results based on selected categories
         const filteredResults = {
+            version: results.version,
             categories: {},
             checks: [],
             overall: results.overall,
@@ -2389,6 +2390,11 @@ function renderDiagnosticsContent(results, filter = 'all') {
     const output = $('#vecthare_diagnostics_content');
     output.empty();
 
+    console.log('VectHare UI: Rendering diagnostics with results:', results);
+    console.log('VectHare UI: Version data received:', results.version);
+    console.log('VectHare UI: Extension version:', results.version?.extension);
+    console.log('VectHare UI: Plugin version:', results.version?.plugin);
+
     const statusIcons = {
         'pass': '<i class="fa-solid fa-circle-check" style="color: var(--vecthare-success);"></i>',
         'warning': '<i class="fa-solid fa-triangle-exclamation" style="color: var(--vecthare-warning);"></i>',
@@ -2439,6 +2445,14 @@ function renderDiagnosticsContent(results, filter = 'all') {
     };
 
     const html = `
+        <!-- Version Info -->
+        <div class="vecthare-diagnostics-version" style="padding: 10px 15px; background: var(--black30alpha); border-radius: 8px; margin-bottom: 15px; font-size: 0.9em; color: var(--grey70);">
+            <i class="fa-solid fa-info-circle"></i>
+            <strong>Extension:</strong> v${results.version?.extension || 'Unknown'}
+            <span style="margin: 0 10px;">•</span>
+            <strong>Plugin:</strong> v${results.version?.plugin || 'Not installed'}
+        </div>
+
         <!-- Summary Stats Bar (Clickable Filters) -->
         <div class="vecthare-diagnostics-stats">
             <div class="vecthare-diag-stat pass ${filter === 'pass' ? 'active' : ''}" data-filter="pass" title="Click to filter by passed">
@@ -2652,6 +2666,8 @@ function copyDiagnosticsReport(results) {
 ╚══════════════════════════════════════════════════════════════╝
 
 📅 Generated: ${timestamp}
+📦 Extension Version: ${results.version?.extension || 'Unknown'}
+🔌 Plugin Version: ${results.version?.plugin || 'Not installed'}
 ${isFiltered ? `🔍 Filter: ${filterNames[filter]} (${filteredCount} of ${totalCount} checks)\n` : ''}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                       CURRENT SETTINGS

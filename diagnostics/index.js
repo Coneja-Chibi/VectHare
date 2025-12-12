@@ -76,6 +76,43 @@ import { cleanupTestCollections } from '../core/collection-loader.js';
 export async function runDiagnostics(settings, includeProductionTests = false) {
     console.log('VectHare Diagnostics: Running health checks...');
 
+    // Get version information
+    let extensionVersion = 'Unknown';
+    let pluginVersion = 'Not installed';
+
+    // Try to get extension version from manifest.json
+    try {
+        // Add cache-busting parameter to ensure fresh fetch
+        const manifestUrl = `/scripts/extensions/third-party/VectHare/manifest.json?_=${Date.now()}`;
+        console.log('VectHare Diagnostics: Fetching manifest from:', manifestUrl);
+        const manifestResponse = await fetch(manifestUrl);
+        console.log('VectHare Diagnostics: Manifest response status:', manifestResponse.status);
+        if (manifestResponse.ok) {
+            const manifest = await manifestResponse.json();
+            console.log('VectHare Diagnostics: Manifest data:', manifest);
+            extensionVersion = manifest.version || 'Unknown';
+            console.log('VectHare Diagnostics: Extension version:', extensionVersion);
+        } else {
+            console.warn('VectHare Diagnostics: Manifest fetch failed with status:', manifestResponse.status);
+        }
+    } catch (error) {
+        console.error('VectHare Diagnostics: Could not fetch manifest.json', error);
+    }
+
+    // Try to get plugin version from health endpoint
+    try {
+        const response = await fetch('/api/plugins/similharity/health', {
+            method: 'GET',
+            headers: { 'Content-Type': 'application/json' }
+        });
+        if (response.ok) {
+            const data = await response.json();
+            pluginVersion = data.version || 'Unknown';
+        }
+    } catch (error) {
+        // Plugin not available
+    }
+
     // Auto-clean any ghost test collections from the registry
     const testCollectionsCleaned = cleanupTestCollections();
     if (testCollectionsCleaned > 0) {
@@ -206,6 +243,10 @@ export async function runDiagnostics(settings, includeProductionTests = false) {
     const overall = failCount > 0 ? 'issues' : warnCount > 0 ? 'warnings' : 'healthy';
 
     const results = {
+        version: {
+            extension: extensionVersion,
+            plugin: pluginVersion
+        },
         categories,
         checks: allChecks,
         overall,
@@ -213,6 +254,9 @@ export async function runDiagnostics(settings, includeProductionTests = false) {
     };
 
     console.log('VectHare Diagnostics: Complete', results);
+    console.log('VectHare Diagnostics: Version object:', results.version);
+    console.log('VectHare Diagnostics: Extension version in results:', results.version.extension);
+    console.log('VectHare Diagnostics: Plugin version in results:', results.version.plugin);
 
     return results;
 }

@@ -335,10 +335,12 @@ export class QdrantBackend extends VectorBackend {
                     `This typically means you switched embedding models. Solution: Delete the collection and re-vectorize. Error: ${errorBody}`
                 );
             }
-
+            
             throw new Error(`[Qdrant] Failed to insert ${items.length} vectors into ${actualCollectionId}: ${response.status} ${response.statusText} - ${errorBody}`);
         }
-
+        
+        console.log(`VectHare Qdrant: Batch ${batchNum}/${batches.length} completed (${batch.length} vectors)`);
+        
         // Register the collection after successful insert
         try {
             // Dynamic import to avoid circular dependency

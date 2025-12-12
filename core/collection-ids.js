@@ -389,7 +389,8 @@ export function parseRegistryKey(registryKey) {
     // Known backends and embedding sources
     const knownBackends = ['standard', 'lancedb', 'vectra', 'milvus', 'qdrant'];
     const knownSources = ['transformers', 'openai', 'cohere', 'ollama', 'llamacpp',
-        'vllm', 'koboldcpp', 'webllm', 'bananabread', 'openrouter'];
+        'vllm', 'koboldcpp', 'webllm', 'bananabread', 'openrouter',
+        'electronhub', 'mistral', 'nomicai', 'palm', 'vertexai', 'togetherai', 'extras'];
 
     const parts = registryKey.split(':');
 

@@ -454,6 +454,7 @@ export async function synchronizeChat(settings, batchSize = 5) {
         let itemsProcessed = 0;
         let chunksCreated = 0;
         let itemsFailed = 0;
+        const label = strategy === 'per_message' ? 'Message' : 'Group';
 
         while (!queue.isEmpty() && itemsProcessed < batchSize) {
             const item = queue.dequeue();
@@ -497,7 +498,6 @@ export async function synchronizeChat(settings, batchSize = 5) {
             }
 
             itemsProcessed++;
-            const label = strategy === 'per_message' ? 'Message' : 'Group';
             progressTracker.updateCurrentItem(`${label} ${itemsProcessed}/${batchSize}${itemsFailed > 0 ? ` (${itemsFailed} failed)` : ''}`);
         }
 

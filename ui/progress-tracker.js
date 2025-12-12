@@ -29,6 +29,9 @@ export class ProgressTracker {
             embeddedChunks: 0,
             totalChunksToEmbed: 0,
             startTime: null,
+            lastBatchTime: null,
+            lastBatchSize: 0,
+            lastBatchStartTime: null,
             errors: [],
         };
     }
@@ -51,6 +54,9 @@ export class ProgressTracker {
             embeddedChunks: 0,
             totalChunksToEmbed: 0,
             startTime: Date.now(),
+            lastBatchTime: null,
+            lastBatchSize: 0,
+            lastBatchStartTime: Date.now(),
             errors: [],
         };
 
@@ -118,6 +124,19 @@ export class ProgressTracker {
      */
     updateEmbeddingProgress(embeddedChunks, totalChunksToEmbed) {
         console.log(`[ProgressTracker] updateEmbeddingProgress: ${embeddedChunks}/${totalChunksToEmbed}`);
+        
+        // Track batch timing for speed calculation
+        const previousEmbedded = this.stats.embeddedChunks || 0;
+        const batchSize = embeddedChunks - previousEmbedded;
+        
+        if (batchSize > 0 && this.stats.lastBatchStartTime) {
+            const now = Date.now();
+            this.stats.lastBatchTime = now - this.stats.lastBatchStartTime;
+            this.stats.lastBatchSize = batchSize;
+            this.stats.lastBatchStartTime = now; // Reset for next batch
+            console.log(`[ProgressTracker] Batch completed: ${batchSize} chunks in ${this.stats.lastBatchTime}ms`);
+        }
+        
         this.stats.embeddedChunks = embeddedChunks;
         this.stats.totalChunksToEmbed = totalChunksToEmbed;
         this.updateDisplay();
@@ -312,9 +331,17 @@ export class ProgressTracker {
             }
         }
 
-        // Calculate speed
-        const elapsed = (Date.now() - this.stats.startTime) / 1000;
-        const speed = elapsed > 0 ? (this.stats.processedItems / elapsed).toFixed(1) : '0.0';
+        // Calculate speed based on last batch timing (more accurate for streaming)
+        let speed = '0.0';
+        if (this.stats.lastBatchTime && this.stats.lastBatchSize > 0) {
+            // Use last batch performance for real-time speed
+            const batchSpeed = (this.stats.lastBatchSize / (this.stats.lastBatchTime / 1000)).toFixed(1);
+            speed = batchSpeed;
+        } else if (this.stats.embeddedChunks > 0 && this.stats.startTime) {
+            // Fallback to average speed
+            const elapsed = (Date.now() - this.stats.startTime) / 1000;
+            speed = elapsed > 0 ? (this.stats.embeddedChunks / elapsed).toFixed(1) : '0.0';
+        }
         document.getElementById('vecthare_progress_speed').textContent = `${speed}/s`;
 
         // Show/hide errors

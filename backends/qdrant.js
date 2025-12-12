@@ -62,6 +62,22 @@ export class QdrantBackend extends VectorBackend {
         // Get Qdrant config from settings
         // Only send relevant config based on cloud vs local mode
         let config;
+        
+        if (settings.qdrant_use_cloud) {
+            // Cloud mode: use URL and API key
+            config = {
+                url: settings.qdrant_url || null,
+                apiKey: settings.qdrant_api_key || null,
+            };
+            console.log('VectHare: Initializing Qdrant Cloud:', config.url);
+        } else {
+            // Local mode: use host and port
+            config = {
+                host: settings.qdrant_host || 'localhost',
+                port: settings.qdrant_port || 6333,
+            };
+            console.log('VectHare: Initializing local Qdrant:', `${config.host}:${config.port}`);
+        }
 
         if (settings.qdrant_use_cloud) {
             // Cloud mode: use URL and API key

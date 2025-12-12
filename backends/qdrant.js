@@ -62,7 +62,7 @@ export class QdrantBackend extends VectorBackend {
         // Get Qdrant config from settings
         // Only send relevant config based on cloud vs local mode
         let config;
-        
+
         if (settings.qdrant_use_cloud) {
             // Cloud mode: use URL and API key
             config = {

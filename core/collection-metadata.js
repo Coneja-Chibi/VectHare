@@ -11,6 +11,7 @@
 
 import { extension_settings } from '../../../../extensions.js';
 import { saveSettingsDebounced } from '../../../../../script.js';
+import { parseRegistryKey } from './collection-ids.js';
 
 // ============================================================================
 // COLLECTION METADATA CRUD
@@ -207,7 +208,27 @@ function ensureCollectionsObject() {
 export function getCollectionMeta(collectionId) {
     ensureCollectionsObject();
 
-    const stored = extension_settings.vecthare.collections[collectionId];
+    let stored = extension_settings.vecthare.collections[collectionId];
+
+    // Fallback: Try alternate key formats for backward compatibility
+    if (!stored && collectionId) {
+        // If looking up with full key (backend:source:id), try without backend
+        const parsed = parseRegistryKey(collectionId);
+        if (parsed.backend && parsed.source) {
+            // Try source:collectionId format
+            const legacyKey = `${parsed.source}:${parsed.collectionId}`;
+            stored = extension_settings.vecthare.collections[legacyKey];
+
+            // Try just collectionId
+            if (!stored) {
+                stored = extension_settings.vecthare.collections[parsed.collectionId];
+            }
+        } else if (parsed.source) {
+            // Already source:collectionId format, try just collectionId
+            stored = extension_settings.vecthare.collections[parsed.collectionId];
+        }
+    }
+
     if (!stored) {
         return { ...defaultCollectionMeta };
     }

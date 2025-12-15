@@ -15,6 +15,7 @@ import { chunkText } from './chunking.js';
 import { insertVectorItems, purgeVectorIndex } from './core-vector-api.js';
 import { setCollectionMeta, getDefaultDecayForType } from './collection-metadata.js';
 import { registerCollection } from './collection-loader.js';
+import { getBackend } from '../backends/backend-manager.js';
 // Import from collection-ids.js - single source of truth for collection ID operations
 import {
     buildChatCollectionId,
@@ -85,14 +86,43 @@ export async function vectorizeContent({ contentType, source, settings }) {
         // Step 4: Insert into vector store (streaming: embed + write together)
         progressTracker.updateProgress(4, 'Processing chunks...');
         const vecthareSettings = extension_settings.vecthare;
-        await insertVectorItems(collectionId, hashedChunks, vecthareSettings, (embedded, total) => {
+
+        // Ensure backend is initialized and healthy before attempting inserts.
+        // Some backends (LanceDB/Qdrant) require initialization which may fail
+        // if attempted lazily during insert; pre-initializing reduces first-run failures.
+        try {
+            await getBackend(vecthareSettings);
+        } catch (e) {
+            console.warn('VectHare: Backend initialization failed before insert, will still attempt insert:', e.message);
+            try {
+                progressTracker.addError(`Backend init failed: ${e.message}`);
+            } catch (_) {}
+            try {
+                toastr.error('Backend initialization failed: ' + e.message, 'VectHare');
+            } catch (_) {}
+        }
+
+        try {
+            await insertVectorItems(collectionId, hashedChunks, vecthareSettings, (embedded, total) => {
             // Update progress with streaming count
             console.log(`[Content Vectorization] Processing progress callback: ${embedded}/${total}`);
             progressTracker.updateEmbeddingProgress(embedded, total);
 
             // Streaming approach: embedding and writing happen together
             progressTracker.updateCurrentItem(`Processing: ${embedded}/${total} chunks (${total - embedded} remaining)`);
-        });
+            });
+        } catch (error) {
+            // Surface insert errors to the UI so users see why vectorization may have failed
+            console.error('VectHare: insertVectorItems failed', error);
+            try {
+                progressTracker.addError(error.message || String(error));
+            } catch (_) {}
+            try {
+                toastr.error('Failed to write embeddings: ' + (error.message || String(error)), 'VectHare');
+            } catch (_) {}
+            // Re-throw so outer handler records completion state and any callers can react
+            throw error;
+        }
 
         // Save collection metadata
         setCollectionMeta(collectionId, {

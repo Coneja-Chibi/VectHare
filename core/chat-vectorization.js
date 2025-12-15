@@ -33,6 +33,7 @@ import { buildSearchContext, filterChunksByConditions, processChunkLinks } from 
 import { getChunkMetadata, getCollectionMeta } from './collection-metadata.js';
 import { processChunkGroups, mergeVirtualLinks } from './chunk-groups.js';
 import { createDebugData, setLastSearchDebug, addTrace, recordChunkFate } from '../ui/search-debug.js';
+import { getSemanticWorldInfoEntries } from './world-info-integration.js';
 import { Queue, LRUCache } from '../utils/data-structures.js';
 import { getRequestHeaders } from '../../../../../script.js';
 import { EXTENSION_PROMPT_TAG, HASH_CACHE_SIZE } from './constants.js';
@@ -1553,12 +1554,20 @@ export async function rearrangeChat(chat, settings, type) {
 
         // === STAGE 1: Gather collections to query ===
         const collectionsToQuery = gatherCollectionsToQuery(settings);
-        if (collectionsToQuery.length === 0) {
-            console.warn('⚠️ VectHare: No enabled collections to query - chunks cannot be injected!');
-            console.log('   💡 Make sure you have enabled at least one collection in VectHare settings');
+        // Allow continuing with WI-only mode if enabled_world_info is set
+        const hasCollections = collectionsToQuery.length > 0;
+        const canQueryWI = settings.enabled_world_info;
+        
+        if (!hasCollections && !canQueryWI) {
+            console.warn('⚠️ VectHare: No enabled collections to query and World Info disabled - chunks cannot be injected!');
+            console.log('   💡 Make sure you have enabled at least one collection in VectHare settings, or enable World Info');
             return;
         }
-        console.log(`VectHare: Will query ${collectionsToQuery.length} collections:`, collectionsToQuery);
+        if (hasCollections) {
+            console.log(`VectHare: Will query ${collectionsToQuery.length} collections:`, collectionsToQuery);
+        } else {
+            console.log('VectHare: No regular collections enabled, but World Info is enabled - will query lorebooks only');
+        }
 
         // === STAGE 2: Build search query ===
         const queryText = buildSearchQuery(chat, settings);
@@ -1568,27 +1577,33 @@ export async function rearrangeChat(chat, settings, type) {
         }
 
         // === STAGE 3: Filter by activation conditions ===
-        const searchContext = buildSearchContext(chat, settings.query || 10, [], {
-            generationType: type || 'normal',
-            isGroupChat: getContext().groupId != null,
-            currentCharacter: getContext().name2 || null,
-            activeLorebookEntries: [],
-            currentChatId: getCurrentChatId(),
-            currentCharacterId: getContext().characterId || null
-        });
-        const activeCollections = await filterActiveCollections(collectionsToQuery, searchContext);
+        let activeCollections = [];
+        if (hasCollections) {
+            const searchContext = buildSearchContext(chat, settings.query || 10, [], {
+                generationType: type || 'normal',
+                isGroupChat: getContext().groupId != null,
+                currentCharacter: getContext().name2 || null,
+                activeLorebookEntries: [],
+                currentChatId: getCurrentChatId(),
+                currentCharacterId: getContext().characterId || null
+            });
+            activeCollections = await filterActiveCollections(collectionsToQuery, searchContext);
+        }
 
-        if (activeCollections.length === 0) {
-            console.log('⚠️ VectHare: No collections passed activation conditions - chunks cannot be injected!');
+        // Allow WI-only mode even if no regular collections pass filters
+        if (activeCollections.length === 0 && !canQueryWI) {
+            console.log('⚠️ VectHare: No collections passed activation conditions and World Info disabled - chunks cannot be injected!');
             console.log('   💡 Check your collection activation conditions in VectHare settings');
             return;
         }
-        console.log(`✅ VectHare: ${activeCollections.length} collections passed activation filters:`, activeCollections);
+        if (activeCollections.length > 0) {
+            console.log(`✅ VectHare: ${activeCollections.length} collections passed activation filters:`, activeCollections);
+        }
 
         // === INITIALIZE DEBUG DATA ===
         const debugData = createDebugData();
         debugData.query = queryText;
-        debugData.collectionId = activeCollections.join(', ');
+        debugData.collectionId = activeCollections.length > 0 ? activeCollections.join(', ') : 'world_info_only';
         debugData.collectionsQueried = activeCollections;
         const effectiveTopK = settings.top_k ?? settings.insert;
         debugData.settings = {
@@ -1609,6 +1624,46 @@ export async function rearrangeChat(chat, settings, type) {
 
         // === STAGE 4: Query all collections and merge results ===
         let chunks = await queryAndMergeCollections(activeCollections, queryText, settings, chat, debugData);
+
+        // === WORLD INFO: Semantic WI entries ===
+        try {
+            if (settings.enabled_world_info) {
+                // Build recentMessages array for WI query
+                const recentMessages = chat
+                    .filter(x => !x.is_system)
+                    .reverse()
+                    .slice(0, settings.world_info_query_depth || settings.query)
+                    .map(x => substituteParams(x.mes));
+
+                const wiEntries = await getSemanticWorldInfoEntries(recentMessages, [], settings);
+                if (Array.isArray(wiEntries) && wiEntries.length > 0) {
+                    addTrace(debugData, 'world_info', `Found ${wiEntries.length} semantic WI entries`, { entries: wiEntries.map(e => ({ uid: e.uid, score: e.score })) });
+
+                    // Convert WI entries into chunk-like objects and merge
+                    const wiChunks = wiEntries.map(e => {
+                        const hash = String(e.uid || getStringHash(e.content || e.key || ''));
+                        return {
+                            hash,
+                            metadata: e.metadata || {},
+                            score: e.score || 1.0,
+                            originalScore: e.score || 1.0,
+                            similarity: e.score || 1.0,
+                            text: e.content || (Array.isArray(e.key) ? e.key.join(' ') : e.key || ''),
+                            index: 0,
+                            collectionId: e.collectionId || `vecthare_wi:${e.lorebookName || 'lorebook'}`,
+                            decayApplied: false
+                        };
+                    });
+
+                    // Prepend WI chunks so they get considered equally in downstream stages
+                    chunks = wiChunks.concat(chunks);
+                    debugData.stages.worldInfo = wiChunks;
+                }
+            }
+        } catch (wiError) {
+            console.warn('VectHare: WorldInfo semantic integration failed', wiError.message);
+            addTrace(debugData, 'world_info', 'WorldInfo query failed', { error: wiError.message });
+        }
         console.log(`VectHare: Retrieved ${chunks.length} total chunks from ${activeCollections.length} collections`);
 
         debugData.stages.initial = [...chunks];

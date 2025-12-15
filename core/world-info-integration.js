@@ -13,7 +13,10 @@
 import { extension_settings } from '../../../../extensions.js';
 import { queryCollection } from './core-vector-api.js';
 import { getCollectionMeta, isCollectionEnabled } from './collection-metadata.js';
+import { parseRegistryKey } from './collection-ids.js';
 import { buildLorebookCollectionId } from './collection-ids.js';
+import { setExtensionPrompt } from '../../../../../script.js';
+import { EXTENSION_PROMPT_TAG } from './constants.js';
 
 // ============================================================================
 // WORLD INFO ACTIVATION HOOKS
@@ -45,13 +48,18 @@ export async function getSemanticWorldInfoEntries(recentMessages, activeEntries,
     const threshold = settings.world_info_threshold || 0.3;
     const topK = settings.world_info_top_k || 3;
 
-    // Get all enabled lorebook collections
+    // Get all enabled lorebook collections (registry keys may be in backend:source:id format)
     const lorebookCollections = getEnabledLorebookCollections(settings);
 
     for (const collection of lorebookCollections) {
         try {
-            // Query this lorebook collection
-            const results = await queryCollection(collection.id, query, topK, settings);
+            // collection.id may be a registry key like 'backend:source:collectionId'
+            // Parse it to extract the actual collectionId used by backends
+            const parsed = parseRegistryKey(collection.id || collection.registryKey || '');
+            const rawCollectionId = parsed.collectionId || collection.id;
+
+            // Query this lorebook collection (use raw collection ID)
+            const results = await queryCollection(rawCollectionId, query, topK, settings);
 
             if (results && results.metadata) {
                 for (let i = 0; i < results.metadata.length; i++) {
@@ -66,7 +74,8 @@ export async function getSemanticWorldInfoEntries(recentMessages, activeEntries,
                             content: meta.text || '',
                             score: score,
                             lorebookName: collection.name,
-                            collectionId: collection.id,
+                            collectionId: rawCollectionId,
+                            registryKey: collection.id, // preserve registry key for metadata lookups
                             vectorActivated: true,
                             metadata: meta
                         };
@@ -255,4 +264,40 @@ export function initializeWorldInfoIntegration() {
     };
 
     console.log('VectHare: World Info integration hooks initialized');
+}
+
+/**
+ * Query semantic WI entries and inject them into the prompt extension tag.
+ * Intended to be called on MESSAGE_SENT to ensure lorebook semantic hits
+ * are available for the subsequent generation.
+ * @param {object[]} chat Current chat messages
+ * @param {object} settings VectHare settings
+ */
+export async function applySemanticEntriesToPrompt(chat, settings) {
+    try {
+        if (!settings || !settings.enabled_world_info) return;
+
+        const recentMessages = chat
+            .filter(m => !m.is_system)
+            .reverse()
+            .slice(0, settings.world_info_query_depth || settings.query || 3)
+            .map(m => (m.mes || '').toString());
+
+        const entries = await getSemanticWorldInfoEntries(recentMessages, [], settings);
+        if (!entries || entries.length === 0) {
+            return;
+        }
+
+        // Build simple injection text from entries (preserve order by score)
+        const text = entries.map(e => e.content || (Array.isArray(e.key) ? e.key.join(' ') : e.key || '')).join('\n\n');
+
+        // Respect global RAG wrappers if configured
+        const fullText = (settings.rag_context ? settings.rag_context + '\n\n' : '') + text;
+
+        // Inject into ST extension prompt tag so generation will include it
+        setExtensionPrompt(EXTENSION_PROMPT_TAG, fullText, settings.position || 0, settings.depth || 2, false);
+        console.log(`VectHare: Injected ${entries.length} semantic WI entries into prompt`);
+    } catch (err) {
+        console.warn('VectHare: Failed to apply semantic WI to prompt', err.message || err);
+    }
 }

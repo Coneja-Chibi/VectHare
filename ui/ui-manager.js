@@ -575,6 +575,7 @@ export function renderSettings(containerId, settings, callbacks) {
                                         <div style="display:flex; gap:8px; margin-top:8px;">
                                             <button id="vecthare_wi_test_btn" class="vecthare-btn-secondary">Test Semantic WI</button>
                                             <button id="vecthare_wi_dump_registry" class="vecthare-btn-secondary">Dump Registry</button>
+                                            <button id="vecthare_wi_apply_first" class="vecthare-btn-primary">Apply First Semantic Hit</button>
                                         </div>
                                     </div>
 
@@ -1978,17 +1979,83 @@ function bindSettingsEvents(settings, callbacks) {
             const recentMessages = raw.split('\n').map(s => s.trim()).filter(Boolean);
             const activeEntries = [];
             const cfg = window.extension_settings?.vecthare || settings;
-            if (!window.VectHare_WorldInfo || !window.VectHare_WorldInfo.getSemanticEntries) {
-                toastr.error('VectHare: WorldInfo hooks not initialized');
+
+            console.log('VectHare: Running semantic WI test with messages:', recentMessages);
+
+            // Primary: use initialized hooks if available
+            if (window.VectHare_WorldInfo && typeof window.VectHare_WorldInfo.getSemanticEntries === 'function') {
+                const entries = await window.VectHare_WorldInfo.getSemanticEntries(recentMessages, activeEntries, cfg);
+                console.log('VectHare: Semantic WI test results (via window hooks):', entries);
+                toastr.info(`Semantic WI test completed - ${entries.length} entries (see console)`);
+
+                // If no entries found, provide extended diagnostics to help debug
+                if (!entries || entries.length === 0) {
+                    try {
+                        console.log('VectHare: No semantic entries — dumping registry and per-collection query info...');
+                        const registry = window.extension_settings?.vecthare?.vecthare_collection_registry || settings.vecthare_collection_registry || [];
+                        console.log('VectHare: Collection registry:', registry);
+
+                        const coreApi = await import('../core/core-vector-api.js');
+                        const metaMod = await import('../core/collection-metadata.js');
+
+                        for (const collKey of registry) {
+                            try {
+                                if (!collKey.includes('lorebook')) continue; // focus on lorebooks
+                                const meta = metaMod.getCollectionMeta(collKey);
+                                console.log(`VectHare: Collection meta for ${collKey}:`, meta);
+
+                                // Check saved hashes (true=include metadata)
+                                if (coreApi.getSavedHashes) {
+                                    try {
+                                        const saved = await coreApi.getSavedHashes(collKey, cfg, true);
+                                        console.log(`VectHare: getSavedHashes for ${collKey}:`, saved && saved.hashes ? saved.hashes.length + ' hashes' : saved);
+                                    } catch (hErr) {
+                                        console.warn(`VectHare: getSavedHashes failed for ${collKey}:`, hErr.message);
+                                    }
+                                }
+
+                                // Run a direct vector query against this collection
+                                try {
+                                    const qres = await coreApi.queryCollection(collKey, recentMessages.join('\n'), cfg.world_info_top_k || 3, cfg);
+                                    console.log(`VectHare: queryCollection result for ${collKey}:`, qres);
+                                } catch (qErr) {
+                                    console.warn(`VectHare: queryCollection failed for ${collKey}:`, qErr.message);
+                                }
+                            } catch (inner) {
+                                console.warn('VectHare: Error inspecting collection', collKey, inner.message);
+                            }
+                        }
+
+                        toastr.info('Extended WI diagnostics written to console (registry + per-collection queries)');
+                    } catch (diagErr) {
+                        console.error('VectHare: Failed to run extended WI diagnostics', diagErr);
+                        toastr.error('Failed to run WI diagnostics: ' + (diagErr.message || diagErr));
+                    }
+                }
+
                 return;
             }
-            console.log('VectHare: Running semantic WI test with messages:', recentMessages);
-            const entries = await window.VectHare_WorldInfo.getSemanticEntries(recentMessages, activeEntries, cfg);
-            console.log('VectHare: Semantic WI test results:', entries);
-            toastr.info(`Semantic WI test completed - ${entries.length} entries (see console)`);
+
+            // Fallback: try dynamic import of module (in case initialization order differed)
+            try {
+                const mod = await import('../core/world-info-integration.js');
+                const fn = mod.getSemanticWorldInfoEntries || mod.getSemanticEntries || mod.default;
+                if (!fn || typeof fn !== 'function') {
+                    throw new Error('WorldInfo module does not export a usable function');
+                }
+                const entries = await fn(recentMessages, activeEntries, cfg);
+                console.log('VectHare: Semantic WI test results (via dynamic import):', entries);
+                toastr.info(`Semantic WI test completed - ${entries.length} entries (see console)`);
+                return;
+            } catch (impErr) {
+                console.warn('VectHare: Dynamic import fallback failed:', impErr.message);
+                toastr.error('VectHare: WorldInfo hooks not initialized and dynamic import failed: ' + impErr.message);
+                return;
+            }
+
         } catch (e) {
             console.error('VectHare: Semantic WI test failed', e);
-            toastr.error('Semantic WI test failed: ' + e.message);
+            try { toastr.error('Semantic WI test failed: ' + (e.message || String(e))); } catch (_) {}
         }
     });
 
@@ -2000,6 +2067,88 @@ function bindSettingsEvents(settings, callbacks) {
         } catch (e) {
             console.error('VectHare: Failed to dump registry', e);
             toastr.error('Failed to dump registry: ' + e.message);
+        }
+    });
+
+    // Apply first semantic hit to ST World Info (best-effort)
+    $('#vecthare_wi_apply_first').on('click', async function() {
+        try {
+            const raw = $('#vecthare_wi_test_input').val() || '';
+            const recentMessages = raw.split('\n').map(s => s.trim()).filter(Boolean);
+            const cfg = window.extension_settings?.vecthare || settings;
+
+            if (!window.VectHare_WorldInfo || !window.VectHare_WorldInfo.getSemanticEntries) {
+                toastr.error('VectHare: WorldInfo hooks not initialized');
+                return;
+            }
+
+            const entries = await window.VectHare_WorldInfo.getSemanticEntries(recentMessages, [], cfg);
+            if (!entries || entries.length === 0) {
+                toastr.info('No semantic entries found');
+                return;
+            }
+
+            const first = entries[0];
+            console.log('VectHare: Applying semantic WI entry:', first);
+
+            // Best-effort: try importing ST's world-info module and invoking common APIs
+            let applied = false;
+            try {
+                const worldInfo = await import('../../../../world-info.js');
+                // Try common function names
+                const candidates = ['applyWorldInfoEntries', 'activateEntries', 'setActiveEntries', 'activateWorldInfoEntries'];
+                for (const name of candidates) {
+                    if (worldInfo[name] && typeof worldInfo[name] === 'function') {
+                        await worldInfo[name]([first]);
+                        applied = true;
+                        console.log(`VectHare: Applied via world-info.${name}`);
+                        break;
+                    }
+                }
+            } catch (e) {
+                console.debug('VectHare: world-info import failed or method not found', e);
+            }
+
+            // Try global window API fallbacks
+            if (!applied) {
+                const fallbackCandidates = [
+                    window.applyWorldInfoEntries,
+                    window.activateWorldInfoEntries,
+                    window.setActiveWorldInfoEntries
+                ];
+                for (const fn of fallbackCandidates) {
+                    if (fn && typeof fn === 'function') {
+                        try {
+                            await fn([first]);
+                            applied = true;
+                            console.log('VectHare: Applied via global fallback function');
+                            break;
+                        } catch (e) {
+                            console.debug('VectHare: fallback apply failed', e);
+                        }
+                    }
+                }
+            }
+
+            if (applied) {
+                toastr.success('Semantic WI entry applied (best-effort)');
+                return;
+            }
+
+            // Final fallback: copy content to clipboard and instruct user
+            const text = first.content || (Array.isArray(first.key) ? first.key.join(', ') : String(first.key));
+            try {
+                await navigator.clipboard.writeText(text);
+                toastr.info('Semantic entry copied to clipboard. Paste into World Info editor to activate.');
+            } catch (e) {
+                console.log('VectHare: Clipboard write failed, showing content in console');
+                console.log('Semantic entry content:', text);
+                toastr.info('Semantic entry logged to console. Paste into World Info editor to activate.');
+            }
+
+        } catch (e) {
+            console.error('VectHare: Apply semantic WI failed', e);
+            toastr.error('Failed to apply semantic WI entry: ' + e.message);
         }
     });
 

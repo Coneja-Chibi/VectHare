@@ -641,6 +641,11 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
                     const chatMessage = chatHashMap.get(hash);
                     text = chatMessage ? substituteParams(chatMessage.mes) : '(text not found)';
                     textSource = chatMessage ? 'chat_lookup' : 'not_found';
+
+                    // Debug: Log when text is not found
+                    if (textSource === 'not_found') {
+                        console.warn(`[VectHare] ⚠️ Chunk text not found! hash=${hash}, meta.text=${meta.text ? 'exists' : 'missing'}, chatMessage=${chatMessage ? 'found' : 'not found'}`);
+                    }
                 }
 
                 // TRACE: Record initial chunk state
@@ -1132,7 +1137,7 @@ async function applyGroupsAndLinksStage(chunks, activeCollections, settings, deb
         // PERF: Build chunk metadata map ONCE and reuse for both virtual and explicit links
         const chunkMetadataMap = new Map();
         for (const chunk of processedChunks) {
-            const meta = getChunkMetadata(chunk.collectionId, chunk.hash) || {};
+            const meta = getChunkMetadata(chunk.hash) || {};
             chunkMetadataMap.set(String(chunk.hash), meta);
         }
 
@@ -1194,7 +1199,7 @@ async function applyGroupsAndLinksStage(chunks, activeCollections, settings, deb
         // PERF: Build metadata map once for chunks with links only
         const chunkMetadataMap = new Map();
         for (const chunk of processedChunks) {
-            const meta = getChunkMetadata(chunk.collectionId, chunk.hash) || {};
+            const meta = getChunkMetadata(chunk.hash) || {};
             if (meta.links && meta.links.length > 0) {
                 chunkMetadataMap.set(String(chunk.hash), meta);
             }
@@ -1327,6 +1332,13 @@ function deduplicateChunks(chunks, chat, settings, debugData) {
  * @returns {string} Formatted injection text
  */
 function buildNestedInjectionText(chunks, settings) {
+    console.log(`[VectHare buildNestedInjectionText] Building injection text for ${chunks.length} chunks`);
+    
+    // Log each chunk's text content for debugging
+    chunks.forEach((chunk, idx) => {
+        console.log(`[VectHare buildNestedInjectionText] Chunk ${idx + 1}: text length=${chunk.text?.length || 0}, preview="${(chunk.text || '').substring(0, 100)}..."`);
+    });
+    
     // Group chunks by collection
     const byCollection = new Map();
     for (const chunk of chunks) {
@@ -1399,6 +1411,9 @@ function buildNestedInjectionText(chunks, settings) {
         fullText = `<${globalXmlTag}>\n${fullText}\n</${globalXmlTag}>`;
     }
 
+    console.log(`[VectHare buildNestedInjectionText] Final text length: ${fullText.length}`);
+    console.log(`[VectHare buildNestedInjectionText] Final text:\n${fullText.substring(0, 500)}${fullText.length > 500 ? '...' : ''}`);
+
     return fullText;
 }
 
@@ -1431,17 +1446,26 @@ function resolveChunkInjectionPosition(chunk, settings) {
  * @returns {{verified: boolean, text: string}} Injection result
  */
 function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
-    // Control print: Log chunks being injected
-    console.log(`[VectHare Injection Control] Starting injection of ${chunksToInject.length} chunks`);
+    // Control print: Log chunks QUEUED for injection (not yet injected)
+    console.log(`[VectHare Injection Control] Preparing to inject ${chunksToInject.length} chunks`);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    let emptyTextCount = 0;
     chunksToInject.forEach((chunk, idx) => {
-        console.log(`  [${idx + 1}/${chunksToInject.length}] CHUNK INJECTED INTO PROMPT`);
+        const textLength = chunk.text?.length || 0;
+        const hasValidText = textLength > 0 && chunk.text !== '(text not found)' && chunk.text !== '(text not available)';
+        if (!hasValidText) emptyTextCount++;
+
+        console.log(`  [${idx + 1}/${chunksToInject.length}] CHUNK QUEUED FOR INJECTION ${!hasValidText ? '⚠️ EMPTY/INVALID TEXT' : ''}`);
         console.log(`      Hash: ${chunk.hash}`);
         console.log(`      Score: ${chunk.score?.toFixed(4)}`);
         console.log(`      Collection: ${chunk.collectionId}`);
-        console.log(`      Text: "${chunk.text?.substring(0, 120)}${chunk.text?.length > 120 ? '...' : ''}"`);
+        console.log(`      Text length: ${textLength} chars ${!hasValidText ? '⚠️' : '✓'}`);
+        console.log(`      Text preview: "${chunk.text?.substring(0, 120)}${textLength > 120 ? '...' : ''}"`);
         console.log('      ─────────────────────────────────────────────────────────────────');
     });
+    if (emptyTextCount > 0) {
+        console.warn(`[VectHare Injection Control] ⚠️ WARNING: ${emptyTextCount}/${chunksToInject.length} chunks have empty or placeholder text!`);
+    }
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
     // Group chunks by resolved injection position+depth
@@ -1463,14 +1487,33 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
         const insertedText = buildNestedInjectionText(group.chunks, settings);
 
         console.log(`[VectHare Injection Control] Single position injection: position="${group.position}", depth=${group.depth}, chunks=${group.chunks.length}, textLength=${insertedText.length}`);
+        console.log(`[VectHare Injection Control] Injection text preview: "${insertedText.substring(0, 200)}${insertedText.length > 200 ? '...' : ''}"`);
+        console.log(`[VectHare Injection Control] 🔧 Calling setExtensionPrompt with:`, {
+            tag: EXTENSION_PROMPT_TAG,
+            textLength: insertedText.length,
+            position: group.position,
+            positionType: typeof group.position,
+            depth: group.depth,
+            depthType: typeof group.depth
+        });
 
         setExtensionPrompt(EXTENSION_PROMPT_TAG, insertedText, group.position, group.depth, false);
 
-        // Verify injection
+        // Verify injection immediately after
+        console.log(`[VectHare Injection Control] 🔍 Verifying extension_prompts after setExtensionPrompt...`);
+        console.log(`[VectHare Injection Control] extension_prompts keys:`, Object.keys(extension_prompts));
+        
         const verifiedPrompt = extension_prompts[EXTENSION_PROMPT_TAG];
         const injectionVerified = verifiedPrompt && verifiedPrompt.value === insertedText;
 
         console.log(`[VectHare Injection Control] Injection verification: ${injectionVerified ? '✓ PASSED' : '✗ FAILED'}`);
+        console.log(`[VectHare Injection Control] extension_prompts[${EXTENSION_PROMPT_TAG}]:`, {
+            exists: !!verifiedPrompt,
+            valueLength: verifiedPrompt?.value?.length,
+            position: verifiedPrompt?.position,
+            depth: verifiedPrompt?.depth,
+            valuePreview: verifiedPrompt?.value?.substring(0, 100)
+        });
 
         if (!injectionVerified) {
             console.warn('VectHare: ⚠️ Injection verification failed!', {
@@ -1827,6 +1870,18 @@ export async function rearrangeChat(chat, settings, type) {
 
         setLastSearchDebug(debugData);
         console.log(`VectHare: ✅ Injected ${chunksToInject.length} chunks (${skippedDuplicates.length} skipped - already in context)`);
+
+        // Final state dump for debugging
+        console.log(`[VectHare] 🔍 FINAL extension_prompts state after rearrangeChat:`, {
+            keys: Object.keys(extension_prompts),
+            vecthareTag: EXTENSION_PROMPT_TAG,
+            vectharePrompt: extension_prompts[EXTENSION_PROMPT_TAG] ? {
+                hasValue: !!extension_prompts[EXTENSION_PROMPT_TAG].value,
+                valueLength: extension_prompts[EXTENSION_PROMPT_TAG].value?.length,
+                position: extension_prompts[EXTENSION_PROMPT_TAG].position,
+                depth: extension_prompts[EXTENSION_PROMPT_TAG].depth
+            } : 'NOT FOUND'
+        });
 
     } catch (error) {
         toastr.error(`Generation interceptor aborted: ${error.message}`, 'VectHare');

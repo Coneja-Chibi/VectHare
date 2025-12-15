@@ -20,6 +20,8 @@ export class ProgressTracker {
         this.currentOperation = null;
         this.timeIntervalId = null;
         this.isComplete = false;
+        // PERF: Cache DOM element references to avoid repeated getElementById calls
+        this.elements = null;
         this.stats = {
             totalItems: 0,
             processedItems: 0,
@@ -64,9 +66,10 @@ export class ProgressTracker {
             this.createPanel();
         }
 
-        // Set the item label
-        const labelEl = document.getElementById('vecthare_progress_stat_label');
-        if (labelEl) labelEl.textContent = itemLabel;
+        // Set the item label using cached element
+        if (this.elements?.statLabel) {
+            this.elements.statLabel.textContent = itemLabel;
+        }
 
         // Start/restart time updater
         this.startTimeUpdater();
@@ -154,8 +157,9 @@ export class ProgressTracker {
      * @param {string} text - Current item description
      */
     updateCurrentItem(text) {
-        const el = document.getElementById('vecthare_progress_current');
-        const textEl = document.getElementById('vecthare_progress_current_text');
+        // PERF: Use cached element references
+        const el = this.elements?.current;
+        const textEl = this.elements?.currentText;
         if (el && textEl) {
             if (text) {
                 textEl.textContent = text;
@@ -272,8 +276,26 @@ export class ProgressTracker {
 
         this.panel = document.getElementById('vecthare_progress_panel');
 
+        // PERF: Cache all DOM element references to avoid repeated getElementById calls
+        this.elements = {
+            title: document.getElementById('vecthare_progress_title'),
+            status: document.getElementById('vecthare_progress_status'),
+            percent: document.getElementById('vecthare_progress_percent'),
+            bar: document.getElementById('vecthare_progress_bar'),
+            processed: document.getElementById('vecthare_progress_processed'),
+            chunks: document.getElementById('vecthare_progress_chunks'),
+            time: document.getElementById('vecthare_progress_time'),
+            speed: document.getElementById('vecthare_progress_speed'),
+            current: document.getElementById('vecthare_progress_current'),
+            currentText: document.getElementById('vecthare_progress_current_text'),
+            statLabel: document.getElementById('vecthare_progress_stat_label'),
+            errors: document.getElementById('vecthare_progress_errors'),
+            errorsList: document.getElementById('vecthare_progress_errors_list'),
+            closeBtn: document.getElementById('vecthare_progress_close'),
+        };
+
         // Bind close button
-        document.getElementById('vecthare_progress_close').addEventListener('click', () => {
+        this.elements.closeBtn.addEventListener('click', () => {
             this.hide();
         });
 
@@ -286,7 +308,7 @@ export class ProgressTracker {
      * @param {string} statusOverride - Override status message
      */
     updateDisplay(statusOverride = '') {
-        if (!this.panel || !this.isVisible) return;
+        if (!this.panel || !this.isVisible || !this.elements) return;
 
         // Calculate progress percentage
         // Prioritize embedding progress if available, otherwise use processed items
@@ -298,36 +320,39 @@ export class ProgressTracker {
             percent = Math.round((this.stats.processedItems / this.stats.totalItems) * 100);
         }
 
+        // PERF: Use cached element references instead of repeated getElementById calls
+        const els = this.elements;
+
         // Update title
-        document.getElementById('vecthare_progress_title').textContent = this.currentOperation || 'VectHare Progress';
+        if (els.title) els.title.textContent = this.currentOperation || 'VectHare Progress';
 
         // Update status
         const status = statusOverride || this.generateStatusMessage();
-        document.getElementById('vecthare_progress_status').textContent = status;
+        if (els.status) els.status.textContent = status;
 
         // Update progress bar
-        document.getElementById('vecthare_progress_percent').textContent = `${percent}%`;
-        document.getElementById('vecthare_progress_bar').style.width = `${percent}%`;
+        if (els.percent) els.percent.textContent = `${percent}%`;
+        if (els.bar) els.bar.style.width = `${percent}%`;
 
         // Update stats
-        document.getElementById('vecthare_progress_processed').textContent =
-            `${this.stats.processedItems} / ${this.stats.totalItems}`;
+        if (els.processed) {
+            els.processed.textContent = `${this.stats.processedItems} / ${this.stats.totalItems}`;
+        }
 
         // Show chunks - with embedding progress if available
-        const chunksEl = document.getElementById('vecthare_progress_chunks');
-        if (chunksEl) {
+        if (els.chunks) {
             if (this.stats.totalChunksToEmbed > 0) {
                 // Show embedding progress: "45/100 (55 left)"
                 const remaining = this.stats.totalChunksToEmbed - this.stats.embeddedChunks;
                 const displayText = `${this.stats.embeddedChunks}/${this.stats.totalChunksToEmbed} (${remaining} left)`;
                 console.log(`[ProgressTracker] Updating chunks display with embedding progress: "${displayText}"`);
-                chunksEl.textContent = displayText;
+                els.chunks.textContent = displayText;
             } else if (this.stats.totalChunks > this.stats.processedItems && this.stats.processedItems > 0) {
                 // Messages are being split into multiple chunks
                 const avgChunks = (this.stats.totalChunks / this.stats.processedItems).toFixed(1);
-                chunksEl.textContent = `${this.stats.totalChunks} (~${avgChunks}/msg)`;
+                els.chunks.textContent = `${this.stats.totalChunks} (~${avgChunks}/msg)`;
             } else {
-                chunksEl.textContent = `${this.stats.totalChunks}`;
+                els.chunks.textContent = `${this.stats.totalChunks}`;
             }
         }
 
@@ -342,12 +367,12 @@ export class ProgressTracker {
             const elapsed = (Date.now() - this.stats.startTime) / 1000;
             speed = elapsed > 0 ? (this.stats.embeddedChunks / elapsed).toFixed(1) : '0.0';
         }
-        document.getElementById('vecthare_progress_speed').textContent = `${speed}/s`;
+        if (els.speed) els.speed.textContent = `${speed}/s`;
 
         // Show/hide errors
         if (this.stats.errors.length > 0) {
             this.updateErrorsList();
-            document.getElementById('vecthare_progress_errors').style.display = 'block';
+            if (els.errors) els.errors.style.display = 'block';
         }
     }
 
@@ -378,10 +403,13 @@ export class ProgressTracker {
      * Update errors list display
      */
     updateErrorsList() {
-        const errorsList = document.getElementById('vecthare_progress_errors_list');
-        errorsList.innerHTML = this.stats.errors
-            .map(err => `<div class="vecthare-progress-error-item">${err.message}</div>`)
-            .join('');
+        // PERF: Use cached element reference
+        const errorsList = this.elements?.errorsList;
+        if (errorsList) {
+            errorsList.innerHTML = this.stats.errors
+                .map(err => `<div class="vecthare-progress-error-item">${err.message}</div>`)
+                .join('');
+        }
     }
 
     /**
@@ -397,9 +425,9 @@ export class ProgressTracker {
             // Only update if visible, not complete, and has start time
             if (this.isVisible && !this.isComplete && this.stats.startTime) {
                 const elapsed = ((Date.now() - this.stats.startTime) / 1000).toFixed(1);
-                const timeEl = document.getElementById('vecthare_progress_time');
-                if (timeEl) {
-                    timeEl.textContent = `${elapsed}s`;
+                // PERF: Use cached element reference
+                if (this.elements?.time) {
+                    this.elements.time.textContent = `${elapsed}s`;
                 }
             }
         }, 100);

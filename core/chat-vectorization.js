@@ -422,8 +422,10 @@ export async function synchronizeChat(settings, batchSize = 5) {
         const strategyBatchSize = settings.batch_size || 4;
 
         // Collect all non-system messages with their data
+        // PERF: Use index from loop instead of indexOf() to avoid O(n²)
         const allMessages = [];
-        for (const msg of context.chat) {
+        for (let i = 0; i < context.chat.length; i++) {
+            const msg = context.chat[i];
             if (msg.is_system) continue;
             // Apply text cleaning to remove HTML tags, metadata blocks, etc.
             const rawText = String(substituteParams(msg.mes));
@@ -431,7 +433,7 @@ export async function synchronizeChat(settings, batchSize = 5) {
             allMessages.push({
                 text,
                 hash: getStringHash(substituteParams(getTextWithoutAttachments(msg))),
-                index: context.chat.indexOf(msg),
+                index: i,
                 is_user: msg.is_user
             });
         }
@@ -595,6 +597,17 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
     let chunksForVisualizer = [];
     const effectiveTopK = settings.top_k ?? settings.insert;
 
+    // PERF: Build hash-to-message Map once for O(1) lookups instead of O(n) find() per chunk
+    const chatHashMap = new Map();
+    for (const msg of chat) {
+        if (msg.mes) {
+            const hash = getStringHash(substituteParams(getTextWithoutAttachments(msg)));
+            if (!chatHashMap.has(hash)) {
+                chatHashMap.set(hash, msg);
+            }
+        }
+    }
+
     for (const collectionId of activeCollections) {
         try {
             const queryResults = await queryCollection(collectionId, queryText, effectiveTopK, settings);
@@ -623,10 +636,9 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
                 let textSource = 'metadata';
 
                 // Fallback: try to find in chat messages if not in metadata
+                // PERF: Use pre-built Map for O(1) lookup instead of O(n) find()
                 if (!text) {
-                    const chatMessage = chat.find(msg =>
-                        msg.mes && getStringHash(substituteParams(getTextWithoutAttachments(msg))) === hash
-                    );
+                    const chatMessage = chatHashMap.get(hash);
                     text = chatMessage ? substituteParams(chatMessage.mes) : '(text not found)';
                     textSource = chatMessage ? 'chat_lookup' : 'not_found';
                 }
@@ -914,9 +926,12 @@ function applyTemporalDecayStage(chunks, chat, settings, threshold, debugData) {
 
     decayedChunks.sort((a, b) => b.score - a.score);
 
+    // PERF: Build Map for O(1) lookups instead of O(n) find() per chunk
+    const decayedChunksMap = new Map(decayedChunks.map(dc => [dc.hash, dc]));
+
     // Map decay results back to chunks and record fate
     let result = chunks.map(chunk => {
-        const decayedChunk = decayedChunks.find(dc => dc.hash === chunk.hash);
+        const decayedChunk = decayedChunksMap.get(chunk.hash);
         if (decayedChunk && (decayedChunk.decayApplied || decayedChunk.sceneAwareDecay)) {
             const decayMultiplier = decayedChunk.score / (decayedChunk.originalScore || 1);
             const newScore = decayedChunk.score;
@@ -983,7 +998,8 @@ function applyTemporalDecayStage(chunks, chat, settings, threshold, debugData) {
  */
 async function applyConditionsStage(chunks, chat, settings, debugData) {
     const beforeCount = chunks.length;
-    const chunksBeforeConditions = [...chunks];
+    // PERF: Build a Map of hash -> chunk data for tracking instead of copying entire array
+    const chunkDataByHash = new Map(chunks.map(c => [c.hash, { score: c.score, conditions: c.metadata?.conditions }]));
 
     addTrace(debugData, 'conditions', 'Starting condition filtering', {
         chunksToFilter: beforeCount,
@@ -994,24 +1010,24 @@ async function applyConditionsStage(chunks, chat, settings, debugData) {
 
     // Record which chunks were dropped by conditions
     const afterConditionsHashes = new Set(filtered.map(c => c.hash));
-    chunksBeforeConditions.forEach(chunk => {
-        if (afterConditionsHashes.has(chunk.hash)) {
-            recordChunkFate(debugData, chunk.hash, 'conditions', 'passed', null, {
-                score: chunk.score,
-                hadConditions: !!chunk.metadata?.conditions
+    for (const [hash, data] of chunkDataByHash) {
+        if (afterConditionsHashes.has(hash)) {
+            recordChunkFate(debugData, hash, 'conditions', 'passed', null, {
+                score: data.score,
+                hadConditions: !!data.conditions
             });
         } else {
-            recordChunkFate(debugData, chunk.hash, 'conditions', 'dropped',
-                chunk.metadata?.conditions
-                    ? `Failed condition: ${JSON.stringify(chunk.metadata.conditions)}`
+            recordChunkFate(debugData, hash, 'conditions', 'dropped',
+                data.conditions
+                    ? `Failed condition: ${JSON.stringify(data.conditions)}`
                     : 'Filtered by condition system',
                 {
-                    score: chunk.score,
-                    conditions: chunk.metadata?.conditions
+                    score: data.score,
+                    conditions: data.conditions
                 }
             );
         }
-    });
+    }
 
     addTrace(debugData, 'conditions', 'Condition filtering completed', {
         before: beforeCount,
@@ -1043,11 +1059,18 @@ async function applyGroupsAndLinksStage(chunks, activeCollections, settings, deb
     });
 
     // Collect groups from all active collections
+    // PERF: Count modes during collection instead of separate filter passes
     const allGroups = [];
+    let inclusiveCount = 0;
+    let exclusiveCount = 0;
     for (const collectionId of activeCollections) {
         const meta = getCollectionMeta(collectionId);
         if (meta.groups && meta.groups.length > 0) {
-            allGroups.push(...meta.groups);
+            for (const group of meta.groups) {
+                allGroups.push(group);
+                if (group.mode === 'inclusive') inclusiveCount++;
+                else if (group.mode === 'exclusive') exclusiveCount++;
+            }
         }
     }
 
@@ -1056,8 +1079,8 @@ async function applyGroupsAndLinksStage(chunks, activeCollections, settings, deb
         // Still process explicit chunk links even without groups
     } else {
         addTrace(debugData, 'groups', `Found ${allGroups.length} groups across collections`, {
-            inclusive: allGroups.filter(g => g.mode === 'inclusive').length,
-            exclusive: allGroups.filter(g => g.mode === 'exclusive').length
+            inclusive: inclusiveCount,
+            exclusive: exclusiveCount
         });
 
         // Build a map of all chunks for mandatory group lookup
@@ -1106,16 +1129,16 @@ async function applyGroupsAndLinksStage(chunks, activeCollections, settings, deb
             }
         }
 
+        // PERF: Build chunk metadata map ONCE and reuse for both virtual and explicit links
+        const chunkMetadataMap = new Map();
+        for (const chunk of processedChunks) {
+            const meta = getChunkMetadata(chunk.collectionId, chunk.hash) || {};
+            chunkMetadataMap.set(String(chunk.hash), meta);
+        }
+
         // If there are virtual links from inclusive groups, merge them with chunk metadata
         if (groupResult.virtualLinks && groupResult.virtualLinks.size > 0) {
             addTrace(debugData, 'groups', `Inclusive groups generated ${groupResult.debug.virtualLinksCreated} virtual links`, {});
-
-            // Build chunk metadata map for link processing
-            const chunkMetadataMap = new Map();
-            for (const chunk of processedChunks) {
-                const meta = getChunkMetadata(chunk.collectionId, chunk.hash) || {};
-                chunkMetadataMap.set(String(chunk.hash), meta);
-            }
 
             // Merge virtual links into metadata
             const mergedMetadata = mergeVirtualLinks(chunkMetadataMap, groupResult.virtualLinks);
@@ -1143,26 +1166,48 @@ async function applyGroupsAndLinksStage(chunks, activeCollections, settings, deb
                     }))
                 });
             }
+        } else {
+            // No virtual links - process explicit chunk links only
+            // Filter to only chunks with explicit links
+            const chunksWithLinks = new Map();
+            for (const [hash, meta] of chunkMetadataMap) {
+                if (meta.links && meta.links.length > 0) {
+                    chunksWithLinks.set(hash, meta);
+                }
+            }
+
+            if (chunksWithLinks.size > 0) {
+                const linkResult = processChunkLinks(processedChunks, chunksWithLinks, settings.group_soft_boost || 0.15);
+                processedChunks = linkResult.chunks;
+
+                const boostedByExplicitLinks = processedChunks.filter(c => c.softLinked && !c.groupBoosted);
+                if (boostedByExplicitLinks.length > 0) {
+                    addTrace(debugData, 'links', `Explicit links boosted ${boostedByExplicitLinks.length} chunks`, {});
+                }
+            }
         }
     }
 
-    // Also process explicit chunk links even if no groups
-    // (Chunks can have links defined directly without being in a group)
-    const chunkMetadataMap = new Map();
-    for (const chunk of processedChunks) {
-        const meta = getChunkMetadata(chunk.collectionId, chunk.hash) || {};
-        if (meta.links && meta.links.length > 0) {
-            chunkMetadataMap.set(String(chunk.hash), meta);
+    // Also process explicit chunk links when there are no groups at all
+    // (This handles the case where allGroups.length === 0)
+    if (allGroups.length === 0) {
+        // PERF: Build metadata map once for chunks with links only
+        const chunkMetadataMap = new Map();
+        for (const chunk of processedChunks) {
+            const meta = getChunkMetadata(chunk.collectionId, chunk.hash) || {};
+            if (meta.links && meta.links.length > 0) {
+                chunkMetadataMap.set(String(chunk.hash), meta);
+            }
         }
-    }
 
-    if (chunkMetadataMap.size > 0) {
-        const linkResult = processChunkLinks(processedChunks, chunkMetadataMap, settings.group_soft_boost || 0.15);
-        processedChunks = linkResult.chunks;
+        if (chunkMetadataMap.size > 0) {
+            const linkResult = processChunkLinks(processedChunks, chunkMetadataMap, settings.group_soft_boost || 0.15);
+            processedChunks = linkResult.chunks;
 
-        const boostedByExplicitLinks = processedChunks.filter(c => c.softLinked && !c.groupBoosted);
-        if (boostedByExplicitLinks.length > 0) {
-            addTrace(debugData, 'links', `Explicit links boosted ${boostedByExplicitLinks.length} chunks`, {});
+            const boostedByExplicitLinks = processedChunks.filter(c => c.softLinked && !c.groupBoosted);
+            if (boostedByExplicitLinks.length > 0) {
+                addTrace(debugData, 'links', `Explicit links boosted ${boostedByExplicitLinks.length} chunks`, {});
+            }
         }
     }
 
@@ -1557,7 +1602,7 @@ export async function rearrangeChat(chat, settings, type) {
         // Allow continuing with WI-only mode if enabled_world_info is set
         const hasCollections = collectionsToQuery.length > 0;
         const canQueryWI = settings.enabled_world_info;
-        
+
         if (!hasCollections && !canQueryWI) {
             console.warn('⚠️ VectHare: No enabled collections to query and World Info disabled - chunks cannot be injected!');
             console.log('   💡 Make sure you have enabled at least one collection in VectHare settings, or enable World Info');

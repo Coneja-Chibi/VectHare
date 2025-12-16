@@ -539,4 +539,94 @@ export class MilvusBackend extends VectorBackend {
         const data = await response.json();
         return data.stats;
     }
+
+    // ========================================================================
+    // HYBRID SEARCH METHODS
+    // ========================================================================
+
+    /**
+     * Check if this backend supports native hybrid search.
+     * Milvus supports hybrid search via the Similharity plugin.
+     * @returns {boolean}
+     */
+    supportsHybridSearch() {
+        return true;
+    }
+
+    /**
+     * Perform hybrid search using Milvus's hybrid capabilities.
+     * Falls back to regular vector search if hybrid endpoint is unavailable.
+     *
+     * @param {string} collectionId - Collection to query
+     * @param {string} searchText - Query text
+     * @param {number} topK - Number of results to return
+     * @param {object} settings - VectHare settings
+     * @param {object} hybridOptions - Hybrid search options
+     * @returns {Promise<{hashes: number[], metadata: object[]}>}
+     */
+    async hybridQuery(collectionId, searchText, topK, settings, hybridOptions = {}) {
+        const {
+            vectorWeight = 0.5,
+            textWeight = 0.5,
+            fusionType = 'rrf',
+            rrfK = 60
+        } = hybridOptions;
+
+        const { type, sourceId } = this._parseCollectionId(collectionId);
+
+        const body = {
+            backend: BACKEND_TYPE,
+            collectionId: 'vecthare_main',
+            searchText: searchText,
+            topK: topK,
+            threshold: 0.0,
+            source: settings.source || 'transformers',
+            model: getModelFromSettings(settings),
+            filters: { type, sourceId },
+            // Hybrid-specific parameters
+            hybrid: true,
+            hybridOptions: {
+                vectorWeight,
+                textWeight,
+                fusionType,
+                rrfK
+            }
+        };
+
+        try {
+            // Try the hybrid endpoint first
+            const response = await fetch('/api/plugins/similharity/chunks/hybrid-query', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                body: JSON.stringify(body),
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                console.log(`[Milvus] Native hybrid search returned ${data.results?.length || 0} results`);
+
+                return {
+                    hashes: data.results.map(r => r.hash),
+                    metadata: data.results.map(r => ({
+                        hash: r.hash,
+                        text: r.text,
+                        score: r.score,
+                        vectorScore: r.vectorScore,
+                        textScore: r.textScore,
+                        fusionMethod: fusionType,
+                        hybridSearch: true,
+                        ...r.metadata,
+                    }))
+                };
+            }
+
+            // If hybrid endpoint returns 404 or similar, fall back
+            console.warn(`[Milvus] Hybrid endpoint not available (${response.status}), falling back to vector-only search`);
+        } catch (error) {
+            console.warn(`[Milvus] Hybrid search failed:`, error.message);
+        }
+
+        // Fallback to regular vector search
+        return this.queryCollection(collectionId, searchText, topK, settings);
+    }
 }

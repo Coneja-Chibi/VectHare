@@ -40,6 +40,7 @@ import {
 } from './providers.js';
 import { applyKeywordBoosts, getOverfetchAmount } from './keyword-boost.js';
 import { applyBM25Scoring } from './bm25-scorer.js';
+import { hybridSearch } from './hybrid-search.js';
 import AsyncUtils from '../utils/async-utils.js';
 import StringUtils from '../utils/string-utils.js';
 import {
@@ -195,6 +196,7 @@ export function getVectorsRequestBody(args = {}, settings) {
             break;
         case 'llamacpp':
             body.apiUrl = settings.use_alt_endpoint ? settings.alt_endpoint_url : textgenerationwebui_settings.server_urls[textgen_types.LLAMACPP];
+            console.log(`VectHare DEBUG llamacpp (core-vector-api): use_alt_endpoint=${settings.use_alt_endpoint}, alt_endpoint_url="${settings.alt_endpoint_url}", ST_url="${textgenerationwebui_settings.server_urls[textgen_types.LLAMACPP]}", final apiUrl="${body.apiUrl}"`);
             break;
         case 'vllm':
             body.apiUrl = settings.use_alt_endpoint ? settings.alt_endpoint_url : textgenerationwebui_settings.server_urls[textgen_types.VLLM];
@@ -776,6 +778,13 @@ export async function queryCollection(collectionId, searchText, topK, settings) 
         }
     }
 
+    // Check if hybrid search is enabled
+    if (settings.hybrid_search_enabled) {
+        console.log('[VectHare] Hybrid search enabled, dispatching to hybrid search module');
+        return hybridSearch(collectionId, searchText, topK, settings, { queryVector });
+    }
+
+    // Standard vector search flow
     // Overfetch to allow keyword-boosted chunks to surface
     const overfetchAmount = getOverfetchAmount(topK);
     const rawResults = await backend.queryCollection(collectionId, searchText, overfetchAmount, settings, queryVector);
@@ -868,6 +877,22 @@ export async function queryMultipleCollections(collectionIds, searchText, topK, 
         }
     }
 
+    // Check if hybrid search is enabled - process each collection with hybrid search
+    if (settings.hybrid_search_enabled) {
+        console.log('[VectHare] Hybrid search enabled for multi-collection query');
+        const processedResults = {};
+        for (const collectionId of collectionIds) {
+            try {
+                processedResults[collectionId] = await hybridSearch(collectionId, searchText, topK, settings, { queryVector });
+            } catch (error) {
+                console.warn(`[VectHare] Hybrid search failed for ${collectionId}:`, error.message);
+                processedResults[collectionId] = { hashes: [], metadata: [] };
+            }
+        }
+        return processedResults;
+    }
+
+    // Standard vector search flow
     // Get raw results from backend (with overfetch for each collection)
     const overfetchAmount = getOverfetchAmount(topK);
     const rawResults = await backend.queryMultipleCollections(collectionIds, searchText, overfetchAmount, threshold, settings, queryVector);

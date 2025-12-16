@@ -419,6 +419,52 @@ export function renderSettings(containerId, settings, callbacks) {
                                 <small class="vecthare_hint">Controls document length normalization (0.75 typical)</small>
                             </div>
 
+                            <!-- Hybrid Search (Vector + Full-Text) -->
+                            <div style="margin-top: 16px; padding: 12px; background: rgba(0,100,200,0.1); border-radius: 8px; border: 1px solid rgba(0,100,200,0.2);">
+                                <label class="checkbox_label" for="vecthare_hybrid_search_enabled" style="margin-bottom: 8px;">
+                                    <input id="vecthare_hybrid_search_enabled" type="checkbox" />
+                                    <span><small><b>Enable Hybrid Search</b></small></span>
+                                </label>
+                                <small class="vecthare_hint">Combines vector similarity with full-text (BM25) search using rank fusion</small>
+
+                                <div id="vecthare_hybrid_params" style="display: none; margin-top: 12px;">
+                                    <label style="margin-top: 8px;">
+                                        <small>Fusion Method</small>
+                                    </label>
+                                    <select id="vecthare_hybrid_fusion_method" class="vecthare-select">
+                                        <option value="rrf">RRF (Reciprocal Rank Fusion)</option>
+                                        <option value="weighted">Weighted Linear Combination</option>
+                                    </select>
+                                    <small class="vecthare_hint">RRF is parameter-free and robust; Weighted allows fine-tuning</small>
+
+                                    <div id="vecthare_hybrid_weights" style="display: none; margin-top: 12px;">
+                                        <label for="vecthare_hybrid_vector_weight">
+                                            <small>Vector Weight: <span id="vecthare_hybrid_vector_weight_value">0.5</span></small>
+                                        </label>
+                                        <input type="range" id="vecthare_hybrid_vector_weight" class="vecthare-slider" min="0" max="1" step="0.1" />
+
+                                        <label for="vecthare_hybrid_text_weight" style="margin-top: 8px;">
+                                            <small>Text Weight: <span id="vecthare_hybrid_text_weight_value">0.5</span></small>
+                                        </label>
+                                        <input type="range" id="vecthare_hybrid_text_weight" class="vecthare-slider" min="0" max="1" step="0.1" />
+                                    </div>
+
+                                    <div id="vecthare_hybrid_rrf_settings" style="margin-top: 12px;">
+                                        <label for="vecthare_hybrid_rrf_k">
+                                            <small>RRF K Constant: <span id="vecthare_hybrid_rrf_k_value">60</span></small>
+                                        </label>
+                                        <input type="range" id="vecthare_hybrid_rrf_k" class="vecthare-slider" min="1" max="100" step="1" />
+                                        <small class="vecthare_hint">Higher K = more weight to top-ranked results (60 is typical)</small>
+                                    </div>
+
+                                    <label class="checkbox_label" for="vecthare_hybrid_native_prefer" style="margin-top: 12px;">
+                                        <input id="vecthare_hybrid_native_prefer" type="checkbox" checked />
+                                        <span><small>Prefer Native Backend Hybrid</small></span>
+                                    </label>
+                                    <small class="vecthare_hint">Use Qdrant/Milvus native hybrid if available (faster)</small>
+                                </div>
+                            </div>
+
                             <label for="vecthare_query_depth" style="margin-top: 12px;">
                                 <small>Query Depth: <span id="vecthare_query_depth_value">2</span> messages</small>
                             </label>
@@ -1902,6 +1948,88 @@ function bindSettingsEvents(settings, callbacks) {
             saveSettingsDebounced();
         });
     $('#vecthare_bm25_b_value').text((settings.bm25_b || 0.75).toFixed(2));
+
+    // ========== Hybrid Search Settings ==========
+
+    // Enable Hybrid Search checkbox
+    $('#vecthare_hybrid_search_enabled')
+        .prop('checked', settings.hybrid_search_enabled || false)
+        .on('change', function() {
+            const enabled = $(this).prop('checked');
+            settings.hybrid_search_enabled = enabled;
+            Object.assign(extension_settings.vecthare, settings);
+            saveSettingsDebounced();
+            $('#vecthare_hybrid_params').toggle(enabled);
+            console.log(`VectHare: Hybrid search ${enabled ? 'enabled' : 'disabled'}`);
+        });
+    // Initialize visibility
+    $('#vecthare_hybrid_params').toggle(settings.hybrid_search_enabled || false);
+
+    // Fusion method selector
+    $('#vecthare_hybrid_fusion_method')
+        .val(settings.hybrid_fusion_method || 'rrf')
+        .on('change', function() {
+            settings.hybrid_fusion_method = String($(this).val());
+            Object.assign(extension_settings.vecthare, settings);
+            saveSettingsDebounced();
+            // Show weights only for weighted method, RRF settings for RRF
+            const isWeighted = settings.hybrid_fusion_method === 'weighted';
+            $('#vecthare_hybrid_weights').toggle(isWeighted);
+            $('#vecthare_hybrid_rrf_settings').toggle(!isWeighted);
+            console.log(`VectHare: Hybrid fusion method changed to ${settings.hybrid_fusion_method}`);
+        });
+    // Initialize visibility based on current method
+    const isWeightedMethod = (settings.hybrid_fusion_method || 'rrf') === 'weighted';
+    $('#vecthare_hybrid_weights').toggle(isWeightedMethod);
+    $('#vecthare_hybrid_rrf_settings').toggle(!isWeightedMethod);
+
+    // Vector weight slider
+    $('#vecthare_hybrid_vector_weight')
+        .val(settings.hybrid_vector_weight ?? 0.5)
+        .on('input', function() {
+            const value = parseFloat($(this).val());
+            const safeValue = isNaN(value) ? 0.5 : value;
+            $('#vecthare_hybrid_vector_weight_value').text(safeValue.toFixed(1));
+            settings.hybrid_vector_weight = safeValue;
+            Object.assign(extension_settings.vecthare, settings);
+            saveSettingsDebounced();
+        });
+    $('#vecthare_hybrid_vector_weight_value').text((settings.hybrid_vector_weight ?? 0.5).toFixed(1));
+
+    // Text weight slider
+    $('#vecthare_hybrid_text_weight')
+        .val(settings.hybrid_text_weight ?? 0.5)
+        .on('input', function() {
+            const value = parseFloat($(this).val());
+            const safeValue = isNaN(value) ? 0.5 : value;
+            $('#vecthare_hybrid_text_weight_value').text(safeValue.toFixed(1));
+            settings.hybrid_text_weight = safeValue;
+            Object.assign(extension_settings.vecthare, settings);
+            saveSettingsDebounced();
+        });
+    $('#vecthare_hybrid_text_weight_value').text((settings.hybrid_text_weight ?? 0.5).toFixed(1));
+
+    // RRF K constant slider
+    $('#vecthare_hybrid_rrf_k')
+        .val(settings.hybrid_rrf_k || 60)
+        .on('input', function() {
+            const value = parseInt($(this).val());
+            const safeValue = isNaN(value) ? 60 : value;
+            $('#vecthare_hybrid_rrf_k_value').text(safeValue);
+            settings.hybrid_rrf_k = safeValue;
+            Object.assign(extension_settings.vecthare, settings);
+            saveSettingsDebounced();
+        });
+    $('#vecthare_hybrid_rrf_k_value').text(settings.hybrid_rrf_k || 60);
+
+    // Prefer native backend hybrid checkbox
+    $('#vecthare_hybrid_native_prefer')
+        .prop('checked', settings.hybrid_native_prefer !== false)
+        .on('change', function() {
+            settings.hybrid_native_prefer = $(this).prop('checked');
+            Object.assign(extension_settings.vecthare, settings);
+            saveSettingsDebounced();
+        });
 
     // Query depth (how many recent messages to include in search query)
     $('#vecthare_query_depth')

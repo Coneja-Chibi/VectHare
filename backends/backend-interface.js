@@ -116,4 +116,35 @@ export class VectorBackend {
     async purgeAllVectorIndexes(settings) {
         throw new Error('Backend must implement purgeAllVectorIndexes()');
     }
+
+    /**
+     * Check if backend supports native hybrid search (dense + sparse/full-text)
+     * Override in backends that support native hybrid search (e.g., Qdrant, Milvus)
+     * @returns {boolean}
+     */
+    supportsHybridSearch() {
+        return false;
+    }
+
+    /**
+     * Perform hybrid search using both dense vectors and full-text/sparse vectors
+     * Default implementation falls back to regular vector search.
+     * Override in backends with native hybrid search support.
+     *
+     * @param {string} collectionId - Collection to query
+     * @param {string} searchText - Query text
+     * @param {number} topK - Number of results to return
+     * @param {object} settings - VectHare settings
+     * @param {object} hybridOptions - Hybrid search options
+     * @param {number} hybridOptions.vectorWeight - Weight for vector scores (0-1)
+     * @param {number} hybridOptions.textWeight - Weight for text scores (0-1)
+     * @param {string} hybridOptions.fusionType - Fusion method ('rrf' or 'weighted')
+     * @param {number} hybridOptions.rrfK - RRF constant (default 60)
+     * @returns {Promise<{hashes: number[], metadata: object[]}>}
+     */
+    async hybridQuery(collectionId, searchText, topK, settings, hybridOptions = {}) {
+        // Default: fallback to vector-only search
+        console.warn(`VectHare: Backend ${this.constructor.name} does not support native hybrid search, using vector-only`);
+        return this.queryCollection(collectionId, searchText, topK, settings);
+    }
 }

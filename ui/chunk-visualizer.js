@@ -51,6 +51,9 @@ let currentCollectionId = null;
 let currentSettings = null;
 let allChunks = [];
 let filteredChunks = [];
+// PERF: Lookup maps for O(1) chunk access instead of O(n) find() operations
+let allChunksMap = new Map(); // uniqueId -> chunk
+let filteredChunksMap = new Map(); // uniqueId -> index in filteredChunks
 let selectedChunkId = null; // Use uniqueId, not hash (hashes can be duplicated)
 let displayLimit = 50;
 let sortBy = 'index'; // 'index', 'length-desc', 'length-asc', 'keywords', 'modified'
@@ -230,6 +233,8 @@ function discardAllChanges() {
         ...chunk,
         data: getChunkData(chunk)
     }));
+    // PERF: Rebuild lookup map after allChunks modification
+    allChunksMap = new Map(allChunks.map(c => [c.uniqueId, c]));
     renderChunkList();
     renderDetailPanel();
 }
@@ -257,7 +262,8 @@ export function openVisualizer(results, collectionId, settings) {
         uniqueId: `chunk_${idx}_${chunk.hash}`, // Create truly unique ID
         data: getChunkData(chunk)
     }));
-
+    // PERF: Build lookup map for O(1) chunk access
+    allChunksMap = new Map(allChunks.map(c => [c.uniqueId, c]));
 
     applyFilters();
     createModal();
@@ -344,6 +350,8 @@ function applyFilters() {
     }
 
     filteredChunks = chunks;
+    // PERF: Build lookup map for O(1) position lookup
+    filteredChunksMap = new Map(filteredChunks.map((c, idx) => [c.uniqueId, idx]));
 }
 
 // ============================================================================
@@ -1318,9 +1326,15 @@ function renderChunkItem(chunk, listIndex) {
 
 function updateStatusBar() {
     const shown = filteredChunks.length;
-    const withConditions = allChunks.filter(c => c.data.conditions?.enabled && c.data.conditions?.rules?.length > 0).length;
-    const withKeywords = allChunks.filter(c => c.data.keywords?.length > 0).length;
-    const blind = allChunks.filter(c => c.data.temporallyBlind).length;
+    // PERF: Count all stats in a single pass instead of 3 separate filter operations
+    let withConditions = 0;
+    let withKeywords = 0;
+    let blind = 0;
+    for (const c of allChunks) {
+        if (c.data.conditions?.enabled && c.data.conditions?.rules?.length > 0) withConditions++;
+        if (c.data.keywords?.length > 0) withKeywords++;
+        if (c.data.temporallyBlind) blind++;
+    }
 
     $('#vecthare_list_status').html(`
         <span>${shown} chunks</span>
@@ -1342,8 +1356,8 @@ function renderDetailPanel() {
         return;
     }
 
-    // Find chunk by uniqueId
-    const chunk = allChunks.find(c => c.uniqueId === selectedChunkId);
+    // PERF: Use Map for O(1) lookup instead of O(n) find()
+    const chunk = allChunksMap.get(selectedChunkId);
     if (!chunk) {
         console.error('VectHare: Chunk not found for uniqueId:', selectedChunkId);
         panel.html('<div class="vecthare-detail-empty">Chunk not found</div>');
@@ -1354,9 +1368,9 @@ function renderDetailPanel() {
     const wordCount = data.text.split(/\s+/).filter(Boolean).length;
     const tokenEstimate = Math.round(wordCount * 1.3);
 
-    // Find position in filtered list (what user sees in the sidebar)
-    const listPosition = filteredChunks.findIndex(c => c.uniqueId === selectedChunkId);
-    const displayNumber = listPosition >= 0 ? listPosition + 1 : '?';
+    // PERF: Use Map for O(1) lookup instead of O(n) findIndex()
+    const listPosition = filteredChunksMap.get(selectedChunkId);
+    const displayNumber = listPosition !== undefined ? listPosition + 1 : '?';
 
     const hasConditions = data.conditions?.enabled && data.conditions?.rules?.length > 0;
     const hasSummaries = data.summaries?.length > 0;
@@ -1680,7 +1694,8 @@ function bindEvents() {
 }
 
 function bindDetailEvents() {
-    const chunk = allChunks.find(c => c.uniqueId === selectedChunkId);
+    // PERF: Use Map for O(1) lookup instead of O(n) find()
+    const chunk = allChunksMap.get(selectedChunkId);
     if (!chunk) return;
 
     const originalText = chunk.data.text;

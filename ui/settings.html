@@ -299,13 +299,42 @@
                 World Info settings
             </h4>
 
-            <label class="checkbox_label" for="vecthare_enabled_world_info" title="Enable activation of World Info entries based on vector similarity.">
+            <label class="checkbox_label" for="vecthare_enabled_world_info" title="Enable semantic activation of World Info entries from vectorized lorebooks based on chat context similarity.">
                 <input id="vecthare_enabled_world_info" type="checkbox" class="checkbox">
-                <span data-i18n="Enable for World Info">Enable for World Info</span>
+                <span data-i18n="Enable Semantic WI Activation">Enable Semantic WI Activation</span>
             </label>
 
             <div id="vecthare_world_info_settings" class="marginTopBot5">
+                <div class="flex-container marginBot10">
+                    <small style="opacity: 0.8; line-height: 1.4;">
+                        <i class="fa-solid fa-info-circle"></i>
+                        Activates World Info entries from <strong>vectorized lorebooks</strong> based on semantic similarity to recent chat messages.
+                        Complements keyword-based activation. Use the <strong>Content Vectorizer</strong> to vectorize your lorebooks first.
+                    </small>
+                </div>
+
                 <div class="flex-container">
+                    <div class="flex1 flexFlowColumn" title="Minimum similarity score required to activate a WI entry (0.0-1.0)">
+                        <label for="vecthare_world_info_threshold">
+                            <small data-i18n="Score Threshold">Score Threshold</small>
+                        </label>
+                        <input id="vecthare_world_info_threshold" type="number" class="text_pole" min="0" max="1" step="0.05" value="0.3" />
+                    </div>
+                    <div class="flex1 flexFlowColumn" title="Maximum number of entries to activate per vectorized lorebook">
+                        <label for="vecthare_world_info_top_k">
+                            <small data-i18n="Top-K per Lorebook">Top-K per Lorebook</small>
+                        </label>
+                        <input id="vecthare_world_info_top_k" type="number" class="text_pole" min="1" max="20" value="3" />
+                    </div>
+                    <div class="flex1 flexFlowColumn" title="Number of recent messages to use for building the search query">
+                        <label for="vecthare_world_info_query_depth">
+                            <small data-i18n="Query Depth">Query Depth</small>
+                        </label>
+                        <input id="vecthare_world_info_query_depth" type="number" class="text_pole" min="1" max="10" value="3" />
+                    </div>
+                </div>
+
+                <div class="flex-container marginTop10">
                     <label for="vecthare_enabled_for_all" class="checkbox_label">
                         <input id="vecthare_enabled_for_all" type="checkbox" />
                         <span data-i18n="Enabled for all entries">Enabled for all entries</span>

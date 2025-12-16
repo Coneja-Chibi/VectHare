@@ -29,22 +29,24 @@ const DOMUtils = {
     const element = document.createElement(tag);
     const { attrs = {}, text, html, children = [], style = {}, data = {} } = options;
 
+    // PERF: Use for...in instead of Object.entries().forEach() to avoid intermediate array
     // Set attributes
-    Object.entries(attrs).forEach(([key, value]) => {
+    for (const key in attrs) {
+      const value = attrs[key];
       if (value !== null && value !== undefined) {
         element.setAttribute(key, value);
       }
-    });
+    }
 
     // Set styles
-    Object.entries(style).forEach(([key, value]) => {
-      element.style[key] = value;
-    });
+    for (const key in style) {
+      element.style[key] = style[key];
+    }
 
     // Set data attributes
-    Object.entries(data).forEach(([key, value]) => {
-      element.dataset[key] = value;
-    });
+    for (const key in data) {
+      element.dataset[key] = data[key];
+    }
 
     // Set content (text is safer, html can be dangerous)
     if (text !== undefined) {
@@ -424,10 +426,11 @@ const DOMUtils = {
   setStyle(target, styles) {
     const element = typeof target === 'string' ? this.query(target) : target;
 
+    // PERF: Use for...in instead of Object.entries().forEach()
     if (element) {
-      Object.entries(styles).forEach(([key, value]) => {
-        element.style[key] = value;
-      });
+      for (const key in styles) {
+        element.style[key] = styles[key];
+      }
     }
 
     return element;
@@ -558,10 +561,11 @@ const DOMUtils = {
     }
 
     // Set multiple attributes
+    // PERF: Use for...in instead of Object.entries().forEach()
     if (typeof attr === 'object') {
-      Object.entries(attr).forEach(([key, val]) => {
-        element.setAttribute(key, val);
-      });
+      for (const key in attr) {
+        element.setAttribute(key, attr[key]);
+      }
       return element;
     }
 

@@ -35,6 +35,7 @@ import { renderSettings, openDiagnosticsModal, loadWebLlmModels, updateWebLlmSta
 import { initializeVisualizer } from './ui/chunk-visualizer.js';
 import { initializeDatabaseBrowser } from './ui/database-browser.js';
 import { initializeSceneMarkers, updateAllMarkerStates, setSceneSettings } from './ui/scene-markers.js';
+import { initializeWorldInfoIntegration } from './core/world-info-integration.js';
 
 // VectHare modules - Cotton-Tales Integration
 import './core/emotion-classifier.js'; // Exposes window.VectHareEmotionClassifier
@@ -117,6 +118,12 @@ const defaultSettings = {
 
     // Collection registry (list of known collection IDs)
     vecthare_collection_registry: [],
+
+    // World Info Integration
+    enabled_world_info: false,          // Enable semantic WI activation
+    world_info_threshold: 0.3,          // Score threshold for WI activation
+    world_info_top_k: 3,                // Max entries to activate per lorebook
+    world_info_query_depth: 3,          // Recent messages to use for query
 };
 
 // Runtime settings (merged with saved settings)
@@ -248,6 +255,9 @@ jQuery(async () => {
     setSceneSettings(settings);
     initializeSceneMarkers();
 
+    // Initialize world info integration hooks
+    initializeWorldInfoIntegration();
+
     // Discover existing collections on load (async, non-blocking)
     discoverExistingCollections(settings).then(collections => {
         if (collections.length > 0) {
@@ -260,6 +270,8 @@ jQuery(async () => {
     // Register event handlers
     eventSource.on(event_types.MESSAGE_DELETED, onChatEvent);
     eventSource.on(event_types.MESSAGE_EDITED, onChatEvent);
+    // Run vector sync tasks on message events
+    // Note: Semantic WI injection happens in the generate_interceptor (rearrangeChat), not here
     eventSource.on(event_types.MESSAGE_SENT, onChatEvent);
     eventSource.on(event_types.MESSAGE_RECEIVED, onChatEvent);
     eventSource.on(event_types.MESSAGE_SWIPED, onChatEvent);

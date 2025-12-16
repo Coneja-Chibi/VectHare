@@ -33,6 +33,7 @@ import { buildSearchContext, filterChunksByConditions, processChunkLinks } from 
 import { getChunkMetadata, getCollectionMeta } from './collection-metadata.js';
 import { processChunkGroups, mergeVirtualLinks } from './chunk-groups.js';
 import { createDebugData, setLastSearchDebug, addTrace, recordChunkFate } from '../ui/search-debug.js';
+import { getSemanticWorldInfoEntries } from './world-info-integration.js';
 import { Queue, LRUCache } from '../utils/data-structures.js';
 import { getRequestHeaders } from '../../../../../script.js';
 import { EXTENSION_PROMPT_TAG, HASH_CACHE_SIZE } from './constants.js';
@@ -421,8 +422,10 @@ export async function synchronizeChat(settings, batchSize = 5) {
         const strategyBatchSize = settings.batch_size || 4;
 
         // Collect all non-system messages with their data
+        // PERF: Use index from loop instead of indexOf() to avoid O(n²)
         const allMessages = [];
-        for (const msg of context.chat) {
+        for (let i = 0; i < context.chat.length; i++) {
+            const msg = context.chat[i];
             if (msg.is_system) continue;
             // Apply text cleaning to remove HTML tags, metadata blocks, etc.
             const rawText = String(substituteParams(msg.mes));
@@ -430,7 +433,7 @@ export async function synchronizeChat(settings, batchSize = 5) {
             allMessages.push({
                 text,
                 hash: getStringHash(substituteParams(getTextWithoutAttachments(msg))),
-                index: context.chat.indexOf(msg),
+                index: i,
                 is_user: msg.is_user
             });
         }
@@ -594,6 +597,17 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
     let chunksForVisualizer = [];
     const effectiveTopK = settings.top_k ?? settings.insert;
 
+    // PERF: Build hash-to-message Map once for O(1) lookups instead of O(n) find() per chunk
+    const chatHashMap = new Map();
+    for (const msg of chat) {
+        if (msg.mes) {
+            const hash = getStringHash(substituteParams(getTextWithoutAttachments(msg)));
+            if (!chatHashMap.has(hash)) {
+                chatHashMap.set(hash, msg);
+            }
+        }
+    }
+
     for (const collectionId of activeCollections) {
         try {
             const queryResults = await queryCollection(collectionId, queryText, effectiveTopK, settings);
@@ -622,12 +636,16 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
                 let textSource = 'metadata';
 
                 // Fallback: try to find in chat messages if not in metadata
+                // PERF: Use pre-built Map for O(1) lookup instead of O(n) find()
                 if (!text) {
-                    const chatMessage = chat.find(msg =>
-                        msg.mes && getStringHash(substituteParams(getTextWithoutAttachments(msg))) === hash
-                    );
+                    const chatMessage = chatHashMap.get(hash);
                     text = chatMessage ? substituteParams(chatMessage.mes) : '(text not found)';
                     textSource = chatMessage ? 'chat_lookup' : 'not_found';
+
+                    // Debug: Log when text is not found
+                    if (textSource === 'not_found') {
+                        console.warn(`[VectHare] ⚠️ Chunk text not found! hash=${hash}, meta.text=${meta.text ? 'exists' : 'missing'}, chatMessage=${chatMessage ? 'found' : 'not found'}`);
+                    }
                 }
 
                 // TRACE: Record initial chunk state
@@ -913,9 +931,12 @@ function applyTemporalDecayStage(chunks, chat, settings, threshold, debugData) {
 
     decayedChunks.sort((a, b) => b.score - a.score);
 
+    // PERF: Build Map for O(1) lookups instead of O(n) find() per chunk
+    const decayedChunksMap = new Map(decayedChunks.map(dc => [dc.hash, dc]));
+
     // Map decay results back to chunks and record fate
     let result = chunks.map(chunk => {
-        const decayedChunk = decayedChunks.find(dc => dc.hash === chunk.hash);
+        const decayedChunk = decayedChunksMap.get(chunk.hash);
         if (decayedChunk && (decayedChunk.decayApplied || decayedChunk.sceneAwareDecay)) {
             const decayMultiplier = decayedChunk.score / (decayedChunk.originalScore || 1);
             const newScore = decayedChunk.score;
@@ -982,7 +1003,8 @@ function applyTemporalDecayStage(chunks, chat, settings, threshold, debugData) {
  */
 async function applyConditionsStage(chunks, chat, settings, debugData) {
     const beforeCount = chunks.length;
-    const chunksBeforeConditions = [...chunks];
+    // PERF: Build a Map of hash -> chunk data for tracking instead of copying entire array
+    const chunkDataByHash = new Map(chunks.map(c => [c.hash, { score: c.score, conditions: c.metadata?.conditions }]));
 
     addTrace(debugData, 'conditions', 'Starting condition filtering', {
         chunksToFilter: beforeCount,
@@ -993,24 +1015,24 @@ async function applyConditionsStage(chunks, chat, settings, debugData) {
 
     // Record which chunks were dropped by conditions
     const afterConditionsHashes = new Set(filtered.map(c => c.hash));
-    chunksBeforeConditions.forEach(chunk => {
-        if (afterConditionsHashes.has(chunk.hash)) {
-            recordChunkFate(debugData, chunk.hash, 'conditions', 'passed', null, {
-                score: chunk.score,
-                hadConditions: !!chunk.metadata?.conditions
+    for (const [hash, data] of chunkDataByHash) {
+        if (afterConditionsHashes.has(hash)) {
+            recordChunkFate(debugData, hash, 'conditions', 'passed', null, {
+                score: data.score,
+                hadConditions: !!data.conditions
             });
         } else {
-            recordChunkFate(debugData, chunk.hash, 'conditions', 'dropped',
-                chunk.metadata?.conditions
-                    ? `Failed condition: ${JSON.stringify(chunk.metadata.conditions)}`
+            recordChunkFate(debugData, hash, 'conditions', 'dropped',
+                data.conditions
+                    ? `Failed condition: ${JSON.stringify(data.conditions)}`
                     : 'Filtered by condition system',
                 {
-                    score: chunk.score,
-                    conditions: chunk.metadata?.conditions
+                    score: data.score,
+                    conditions: data.conditions
                 }
             );
         }
-    });
+    }
 
     addTrace(debugData, 'conditions', 'Condition filtering completed', {
         before: beforeCount,
@@ -1042,11 +1064,18 @@ async function applyGroupsAndLinksStage(chunks, activeCollections, settings, deb
     });
 
     // Collect groups from all active collections
+    // PERF: Count modes during collection instead of separate filter passes
     const allGroups = [];
+    let inclusiveCount = 0;
+    let exclusiveCount = 0;
     for (const collectionId of activeCollections) {
         const meta = getCollectionMeta(collectionId);
         if (meta.groups && meta.groups.length > 0) {
-            allGroups.push(...meta.groups);
+            for (const group of meta.groups) {
+                allGroups.push(group);
+                if (group.mode === 'inclusive') inclusiveCount++;
+                else if (group.mode === 'exclusive') exclusiveCount++;
+            }
         }
     }
 
@@ -1055,8 +1084,8 @@ async function applyGroupsAndLinksStage(chunks, activeCollections, settings, deb
         // Still process explicit chunk links even without groups
     } else {
         addTrace(debugData, 'groups', `Found ${allGroups.length} groups across collections`, {
-            inclusive: allGroups.filter(g => g.mode === 'inclusive').length,
-            exclusive: allGroups.filter(g => g.mode === 'exclusive').length
+            inclusive: inclusiveCount,
+            exclusive: exclusiveCount
         });
 
         // Build a map of all chunks for mandatory group lookup
@@ -1105,16 +1134,16 @@ async function applyGroupsAndLinksStage(chunks, activeCollections, settings, deb
             }
         }
 
+        // PERF: Build chunk metadata map ONCE and reuse for both virtual and explicit links
+        const chunkMetadataMap = new Map();
+        for (const chunk of processedChunks) {
+            const meta = getChunkMetadata(chunk.hash) || {};
+            chunkMetadataMap.set(String(chunk.hash), meta);
+        }
+
         // If there are virtual links from inclusive groups, merge them with chunk metadata
         if (groupResult.virtualLinks && groupResult.virtualLinks.size > 0) {
             addTrace(debugData, 'groups', `Inclusive groups generated ${groupResult.debug.virtualLinksCreated} virtual links`, {});
-
-            // Build chunk metadata map for link processing
-            const chunkMetadataMap = new Map();
-            for (const chunk of processedChunks) {
-                const meta = getChunkMetadata(chunk.collectionId, chunk.hash) || {};
-                chunkMetadataMap.set(String(chunk.hash), meta);
-            }
 
             // Merge virtual links into metadata
             const mergedMetadata = mergeVirtualLinks(chunkMetadataMap, groupResult.virtualLinks);
@@ -1142,26 +1171,48 @@ async function applyGroupsAndLinksStage(chunks, activeCollections, settings, deb
                     }))
                 });
             }
+        } else {
+            // No virtual links - process explicit chunk links only
+            // Filter to only chunks with explicit links
+            const chunksWithLinks = new Map();
+            for (const [hash, meta] of chunkMetadataMap) {
+                if (meta.links && meta.links.length > 0) {
+                    chunksWithLinks.set(hash, meta);
+                }
+            }
+
+            if (chunksWithLinks.size > 0) {
+                const linkResult = processChunkLinks(processedChunks, chunksWithLinks, settings.group_soft_boost || 0.15);
+                processedChunks = linkResult.chunks;
+
+                const boostedByExplicitLinks = processedChunks.filter(c => c.softLinked && !c.groupBoosted);
+                if (boostedByExplicitLinks.length > 0) {
+                    addTrace(debugData, 'links', `Explicit links boosted ${boostedByExplicitLinks.length} chunks`, {});
+                }
+            }
         }
     }
 
-    // Also process explicit chunk links even if no groups
-    // (Chunks can have links defined directly without being in a group)
-    const chunkMetadataMap = new Map();
-    for (const chunk of processedChunks) {
-        const meta = getChunkMetadata(chunk.collectionId, chunk.hash) || {};
-        if (meta.links && meta.links.length > 0) {
-            chunkMetadataMap.set(String(chunk.hash), meta);
+    // Also process explicit chunk links when there are no groups at all
+    // (This handles the case where allGroups.length === 0)
+    if (allGroups.length === 0) {
+        // PERF: Build metadata map once for chunks with links only
+        const chunkMetadataMap = new Map();
+        for (const chunk of processedChunks) {
+            const meta = getChunkMetadata(chunk.hash) || {};
+            if (meta.links && meta.links.length > 0) {
+                chunkMetadataMap.set(String(chunk.hash), meta);
+            }
         }
-    }
 
-    if (chunkMetadataMap.size > 0) {
-        const linkResult = processChunkLinks(processedChunks, chunkMetadataMap, settings.group_soft_boost || 0.15);
-        processedChunks = linkResult.chunks;
+        if (chunkMetadataMap.size > 0) {
+            const linkResult = processChunkLinks(processedChunks, chunkMetadataMap, settings.group_soft_boost || 0.15);
+            processedChunks = linkResult.chunks;
 
-        const boostedByExplicitLinks = processedChunks.filter(c => c.softLinked && !c.groupBoosted);
-        if (boostedByExplicitLinks.length > 0) {
-            addTrace(debugData, 'links', `Explicit links boosted ${boostedByExplicitLinks.length} chunks`, {});
+            const boostedByExplicitLinks = processedChunks.filter(c => c.softLinked && !c.groupBoosted);
+            if (boostedByExplicitLinks.length > 0) {
+                addTrace(debugData, 'links', `Explicit links boosted ${boostedByExplicitLinks.length} chunks`, {});
+            }
         }
     }
 
@@ -1281,6 +1332,13 @@ function deduplicateChunks(chunks, chat, settings, debugData) {
  * @returns {string} Formatted injection text
  */
 function buildNestedInjectionText(chunks, settings) {
+    console.log(`[VectHare buildNestedInjectionText] Building injection text for ${chunks.length} chunks`);
+    
+    // Log each chunk's text content for debugging
+    chunks.forEach((chunk, idx) => {
+        console.log(`[VectHare buildNestedInjectionText] Chunk ${idx + 1}: text length=${chunk.text?.length || 0}, preview="${(chunk.text || '').substring(0, 100)}..."`);
+    });
+    
     // Group chunks by collection
     const byCollection = new Map();
     for (const chunk of chunks) {
@@ -1353,6 +1411,9 @@ function buildNestedInjectionText(chunks, settings) {
         fullText = `<${globalXmlTag}>\n${fullText}\n</${globalXmlTag}>`;
     }
 
+    console.log(`[VectHare buildNestedInjectionText] Final text length: ${fullText.length}`);
+    console.log(`[VectHare buildNestedInjectionText] Final text:\n${fullText.substring(0, 500)}${fullText.length > 500 ? '...' : ''}`);
+
     return fullText;
 }
 
@@ -1385,17 +1446,26 @@ function resolveChunkInjectionPosition(chunk, settings) {
  * @returns {{verified: boolean, text: string}} Injection result
  */
 function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
-    // Control print: Log chunks being injected
-    console.log(`[VectHare Injection Control] Starting injection of ${chunksToInject.length} chunks`);
+    // Control print: Log chunks QUEUED for injection (not yet injected)
+    console.log(`[VectHare Injection Control] Preparing to inject ${chunksToInject.length} chunks`);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    let emptyTextCount = 0;
     chunksToInject.forEach((chunk, idx) => {
-        console.log(`  [${idx + 1}/${chunksToInject.length}] CHUNK INJECTED INTO PROMPT`);
+        const textLength = chunk.text?.length || 0;
+        const hasValidText = textLength > 0 && chunk.text !== '(text not found)' && chunk.text !== '(text not available)';
+        if (!hasValidText) emptyTextCount++;
+
+        console.log(`  [${idx + 1}/${chunksToInject.length}] CHUNK QUEUED FOR INJECTION ${!hasValidText ? '⚠️ EMPTY/INVALID TEXT' : ''}`);
         console.log(`      Hash: ${chunk.hash}`);
         console.log(`      Score: ${chunk.score?.toFixed(4)}`);
         console.log(`      Collection: ${chunk.collectionId}`);
-        console.log(`      Text: "${chunk.text?.substring(0, 120)}${chunk.text?.length > 120 ? '...' : ''}"`);
+        console.log(`      Text length: ${textLength} chars ${!hasValidText ? '⚠️' : '✓'}`);
+        console.log(`      Text preview: "${chunk.text?.substring(0, 120)}${textLength > 120 ? '...' : ''}"`);
         console.log('      ─────────────────────────────────────────────────────────────────');
     });
+    if (emptyTextCount > 0) {
+        console.warn(`[VectHare Injection Control] ⚠️ WARNING: ${emptyTextCount}/${chunksToInject.length} chunks have empty or placeholder text!`);
+    }
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
     // Group chunks by resolved injection position+depth
@@ -1417,14 +1487,33 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
         const insertedText = buildNestedInjectionText(group.chunks, settings);
 
         console.log(`[VectHare Injection Control] Single position injection: position="${group.position}", depth=${group.depth}, chunks=${group.chunks.length}, textLength=${insertedText.length}`);
+        console.log(`[VectHare Injection Control] Injection text preview: "${insertedText.substring(0, 200)}${insertedText.length > 200 ? '...' : ''}"`);
+        console.log(`[VectHare Injection Control] 🔧 Calling setExtensionPrompt with:`, {
+            tag: EXTENSION_PROMPT_TAG,
+            textLength: insertedText.length,
+            position: group.position,
+            positionType: typeof group.position,
+            depth: group.depth,
+            depthType: typeof group.depth
+        });
 
         setExtensionPrompt(EXTENSION_PROMPT_TAG, insertedText, group.position, group.depth, false);
 
-        // Verify injection
+        // Verify injection immediately after
+        console.log(`[VectHare Injection Control] 🔍 Verifying extension_prompts after setExtensionPrompt...`);
+        console.log(`[VectHare Injection Control] extension_prompts keys:`, Object.keys(extension_prompts));
+        
         const verifiedPrompt = extension_prompts[EXTENSION_PROMPT_TAG];
         const injectionVerified = verifiedPrompt && verifiedPrompt.value === insertedText;
 
         console.log(`[VectHare Injection Control] Injection verification: ${injectionVerified ? '✓ PASSED' : '✗ FAILED'}`);
+        console.log(`[VectHare Injection Control] extension_prompts[${EXTENSION_PROMPT_TAG}]:`, {
+            exists: !!verifiedPrompt,
+            valueLength: verifiedPrompt?.value?.length,
+            position: verifiedPrompt?.position,
+            depth: verifiedPrompt?.depth,
+            valuePreview: verifiedPrompt?.value?.substring(0, 100)
+        });
 
         if (!injectionVerified) {
             console.warn('VectHare: ⚠️ Injection verification failed!', {
@@ -1553,12 +1642,20 @@ export async function rearrangeChat(chat, settings, type) {
 
         // === STAGE 1: Gather collections to query ===
         const collectionsToQuery = gatherCollectionsToQuery(settings);
-        if (collectionsToQuery.length === 0) {
-            console.warn('⚠️ VectHare: No enabled collections to query - chunks cannot be injected!');
-            console.log('   💡 Make sure you have enabled at least one collection in VectHare settings');
+        // Allow continuing with WI-only mode if enabled_world_info is set
+        const hasCollections = collectionsToQuery.length > 0;
+        const canQueryWI = settings.enabled_world_info;
+
+        if (!hasCollections && !canQueryWI) {
+            console.warn('⚠️ VectHare: No enabled collections to query and World Info disabled - chunks cannot be injected!');
+            console.log('   💡 Make sure you have enabled at least one collection in VectHare settings, or enable World Info');
             return;
         }
-        console.log(`VectHare: Will query ${collectionsToQuery.length} collections:`, collectionsToQuery);
+        if (hasCollections) {
+            console.log(`VectHare: Will query ${collectionsToQuery.length} collections:`, collectionsToQuery);
+        } else {
+            console.log('VectHare: No regular collections enabled, but World Info is enabled - will query lorebooks only');
+        }
 
         // === STAGE 2: Build search query ===
         const queryText = buildSearchQuery(chat, settings);
@@ -1568,27 +1665,33 @@ export async function rearrangeChat(chat, settings, type) {
         }
 
         // === STAGE 3: Filter by activation conditions ===
-        const searchContext = buildSearchContext(chat, settings.query || 10, [], {
-            generationType: type || 'normal',
-            isGroupChat: getContext().groupId != null,
-            currentCharacter: getContext().name2 || null,
-            activeLorebookEntries: [],
-            currentChatId: getCurrentChatId(),
-            currentCharacterId: getContext().characterId || null
-        });
-        const activeCollections = await filterActiveCollections(collectionsToQuery, searchContext);
+        let activeCollections = [];
+        if (hasCollections) {
+            const searchContext = buildSearchContext(chat, settings.query || 10, [], {
+                generationType: type || 'normal',
+                isGroupChat: getContext().groupId != null,
+                currentCharacter: getContext().name2 || null,
+                activeLorebookEntries: [],
+                currentChatId: getCurrentChatId(),
+                currentCharacterId: getContext().characterId || null
+            });
+            activeCollections = await filterActiveCollections(collectionsToQuery, searchContext);
+        }
 
-        if (activeCollections.length === 0) {
-            console.log('⚠️ VectHare: No collections passed activation conditions - chunks cannot be injected!');
+        // Allow WI-only mode even if no regular collections pass filters
+        if (activeCollections.length === 0 && !canQueryWI) {
+            console.log('⚠️ VectHare: No collections passed activation conditions and World Info disabled - chunks cannot be injected!');
             console.log('   💡 Check your collection activation conditions in VectHare settings');
             return;
         }
-        console.log(`✅ VectHare: ${activeCollections.length} collections passed activation filters:`, activeCollections);
+        if (activeCollections.length > 0) {
+            console.log(`✅ VectHare: ${activeCollections.length} collections passed activation filters:`, activeCollections);
+        }
 
         // === INITIALIZE DEBUG DATA ===
         const debugData = createDebugData();
         debugData.query = queryText;
-        debugData.collectionId = activeCollections.join(', ');
+        debugData.collectionId = activeCollections.length > 0 ? activeCollections.join(', ') : 'world_info_only';
         debugData.collectionsQueried = activeCollections;
         const effectiveTopK = settings.top_k ?? settings.insert;
         debugData.settings = {
@@ -1609,6 +1712,46 @@ export async function rearrangeChat(chat, settings, type) {
 
         // === STAGE 4: Query all collections and merge results ===
         let chunks = await queryAndMergeCollections(activeCollections, queryText, settings, chat, debugData);
+
+        // === WORLD INFO: Semantic WI entries ===
+        try {
+            if (settings.enabled_world_info) {
+                // Build recentMessages array for WI query
+                const recentMessages = chat
+                    .filter(x => !x.is_system)
+                    .reverse()
+                    .slice(0, settings.world_info_query_depth || settings.query)
+                    .map(x => substituteParams(x.mes));
+
+                const wiEntries = await getSemanticWorldInfoEntries(recentMessages, [], settings);
+                if (Array.isArray(wiEntries) && wiEntries.length > 0) {
+                    addTrace(debugData, 'world_info', `Found ${wiEntries.length} semantic WI entries`, { entries: wiEntries.map(e => ({ uid: e.uid, score: e.score })) });
+
+                    // Convert WI entries into chunk-like objects and merge
+                    const wiChunks = wiEntries.map(e => {
+                        const hash = String(e.uid || getStringHash(e.content || e.key || ''));
+                        return {
+                            hash,
+                            metadata: e.metadata || {},
+                            score: e.score || 1.0,
+                            originalScore: e.score || 1.0,
+                            similarity: e.score || 1.0,
+                            text: e.content || (Array.isArray(e.key) ? e.key.join(' ') : e.key || ''),
+                            index: 0,
+                            collectionId: e.collectionId || `vecthare_wi:${e.lorebookName || 'lorebook'}`,
+                            decayApplied: false
+                        };
+                    });
+
+                    // Prepend WI chunks so they get considered equally in downstream stages
+                    chunks = wiChunks.concat(chunks);
+                    debugData.stages.worldInfo = wiChunks;
+                }
+            }
+        } catch (wiError) {
+            console.warn('VectHare: WorldInfo semantic integration failed', wiError.message);
+            addTrace(debugData, 'world_info', 'WorldInfo query failed', { error: wiError.message });
+        }
         console.log(`VectHare: Retrieved ${chunks.length} total chunks from ${activeCollections.length} collections`);
 
         debugData.stages.initial = [...chunks];
@@ -1727,6 +1870,18 @@ export async function rearrangeChat(chat, settings, type) {
 
         setLastSearchDebug(debugData);
         console.log(`VectHare: ✅ Injected ${chunksToInject.length} chunks (${skippedDuplicates.length} skipped - already in context)`);
+
+        // Final state dump for debugging
+        console.log(`[VectHare] 🔍 FINAL extension_prompts state after rearrangeChat:`, {
+            keys: Object.keys(extension_prompts),
+            vecthareTag: EXTENSION_PROMPT_TAG,
+            vectharePrompt: extension_prompts[EXTENSION_PROMPT_TAG] ? {
+                hasValue: !!extension_prompts[EXTENSION_PROMPT_TAG].value,
+                valueLength: extension_prompts[EXTENSION_PROMPT_TAG].value?.length,
+                position: extension_prompts[EXTENSION_PROMPT_TAG].position,
+                depth: extension_prompts[EXTENSION_PROMPT_TAG].depth
+            } : 'NOT FOUND'
+        });
 
     } catch (error) {
         toastr.error(`Generation interceptor aborted: ${error.message}`, 'VectHare');

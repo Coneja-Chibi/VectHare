@@ -148,6 +148,15 @@ function updateChunkData(hash, updates) {
     const existing = pendingChanges.get(hash) || {};
     pendingChanges.set(hash, { ...existing, ...updates });
     hasUnsavedChanges = true;
+        // refresh the chunk data
+        allChunks.forEach(chunk => {
+            if (chunk.hash === hash) {
+                // merge pending changes into the chunk for fresh data if chunks end up with same hash somehow.
+                const stored = getChunkMetadata(hash) || {};
+                const pending = pendingChanges.get(hash) || {};
+                chunk.data = { ...chunk.data, ...pending };
+            }
+        });
 }
 
 async function saveAllChanges() {
@@ -864,7 +873,7 @@ function renderGroupsTab() {
                <span>${stats.exclusiveGroups} exclusive</span>`
             : ''
     );
-
+    bindGroupsTabEvents();
     if (groups.length === 0) {
         container.html(`
             <div class="vecthare-groups-empty">
@@ -885,9 +894,7 @@ function renderGroupsTab() {
             <div class="vecthare-detail-empty">Select a group to view details</div>
         </div>
     `);
-
-    renderGroupList();
-    bindGroupsTabEvents();
+    renderGroupList();    
 }
 
 /**
@@ -1096,11 +1103,11 @@ function openAddMemberDialog() {
     });
 
     // Click to add
-    $(document).on('click.addmember', '.vecthare-member-option', function() {
+    overlay.on('click', '.vecthare-member-option', function (e) {
+        e.stopPropagation(); // Prevent overlay close
         const hash = $(this).data('hash');
         addMemberToGroup(String(hash));
         overlay.remove();
-        $(document).off('click.addmember');
     });
 }
 
@@ -1582,13 +1589,38 @@ function renderDetailPanel() {
 
 function formatConditionRule(rule) {
     if (!rule || !rule.type) return 'Unknown condition';
+
     const negation = rule.negated ? 'NOT ' : '';
+    const value = rule.settings?.value || rule.value || '';  // Support both formats
+
     switch (rule.type) {
-        case 'messageCount': return `${negation}messageCount ${rule.operator || '>='} ${rule.value}`;
-        case 'emotion': return `${negation}emotion: ${rule.value}`;
-        case 'isGroupChat': return `${negation}isGroupChat`;
-        case 'speaker': return `${negation}speaker: ${rule.value}`;
-        default: return `${negation}${rule.type}: ${rule.value || ''}`;
+        case 'pattern':
+            return `${negation}Pattern: "${value}"`;
+        case 'speaker':
+            return `${negation}Speaker: ${value || 'undefined'}`;
+        case 'messageCount':
+            // Extract operator and number if value is like ">=100" or just "100"
+            const match = value.match(/^([><=!]+)?(\d+)$/);
+            if (match) {
+                const operator = match[1] || '>=';
+                const count = match[2];
+                return `${negation}Message Count ${operator} ${count}`;
+            }
+            return `${negation}Message Count: ${value}`;
+        case 'emotion':
+            return `${negation}Emotion: ${value}`;
+        case 'isGroupChat':
+            return `${negation}Is Group Chat`;
+        case 'timeOfDay':
+            // Handle different time formats
+            if (!value) return `${negation}Time of Day: (no time set)`;
+            return `${negation}Time of Day: ${value}`;
+        case 'randomChance':
+            // Value should be a percentage
+            const percent = value || rule.settings?.percent || '50';
+            return `${negation}Random Chance: ${percent}%`;
+        default:
+            return `${negation}${rule.type}: ${value || '(empty)'}`;
     }
 }
 

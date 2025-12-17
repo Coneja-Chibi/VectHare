@@ -393,18 +393,6 @@ export function renderSettings(containerId, settings, callbacks) {
                             <input type="range" id="vecthare_score_threshold" class="vecthare-slider" min="0" max="1" step="0.05" />
                             <small class="vecthare_hint">Minimum relevance score for retrieval</small>
 
-                            <!-- Keyword Extraction Level -->
-                            <label style="margin-top: 16px;">
-                                <small>Keyword Extraction Level</small>
-                            </label>
-                            <select id="vecthare_keyword_extraction_level" class="vecthare-select">
-                                <option value="off">Off - No keywords</option>
-                                <option value="minimal">Minimal - 3 keywords, first 500 chars</option>
-                                <option value="balanced">Balanced - 8 keywords, first 1000 chars</option>
-                                <option value="aggressive">Aggressive - 15 keywords, full text</option>
-                            </select>
-                            <small class="vecthare_hint">TF-IDF keyword extraction for new messages (re-vectorize to update existing)</small>
-
                             <!-- Keyword Scoring Method -->
                             <label style="margin-top: 16px;">
                                 <small>Keyword Scoring Method</small>
@@ -1912,16 +1900,6 @@ function bindSettingsEvents(settings, callbacks) {
             saveSettingsDebounced();
         });
     $('#vecthare_deduplication_depth_value').text(settings.deduplication_depth ?? 50);
-
-    // Keyword extraction level (for chat vectorization)
-    $('#vecthare_keyword_extraction_level')
-        .val(settings.keyword_extraction_level || 'balanced')
-        .on('change', function() {
-            settings.keyword_extraction_level = String($(this).val());
-            Object.assign(extension_settings.vecthare, settings);
-            saveSettingsDebounced();
-            console.log(`VectHare: Keyword extraction level changed to ${settings.keyword_extraction_level}`);
-        });
 
     // Keyword scoring method
     $('#vecthare_keyword_scoring_method')

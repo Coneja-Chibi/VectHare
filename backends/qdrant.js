@@ -384,6 +384,16 @@ export class QdrantBackend extends VectorBackend {
             model: getModelFromSettings(settings),
         };
 
+    //Use queryVector if provided, otherwise searchText
+        if (queryVector) {
+            body.queryVector = queryVector;
+        } else if (searchText?.trim()) {
+            body.searchText = searchText;
+        } else {
+            console.warn('[Qdrant] No queryVector or searchText provided');
+            return { hashes: [], metadata: [] };
+        }
+
         // Add content_type filter for multitenancy mode
         if (settings.qdrant_multitenancy) {
             body.filter = {
@@ -435,6 +445,18 @@ export class QdrantBackend extends VectorBackend {
                     source: settings.source || 'transformers',
                     model: getModelFromSettings(settings),
                 };
+
+
+                // Use queryVector if provided, otherwise searchText
+                if (queryVector) {
+                    body.queryVector = queryVector;
+                } else if (searchText?.trim()) {
+                    body.searchText = searchText;
+                } else {
+                    console.warn(`[Qdrant] No queryVector or searchText for ${collectionId}`);
+                    results[collectionId] = { hashes: [], metadata: [] };
+                    continue;
+                }
 
                 // Add content_type filter for multitenancy mode
                 if (settings.qdrant_multitenancy) {

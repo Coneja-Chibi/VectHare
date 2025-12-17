@@ -58,6 +58,11 @@ import {
     testChunkServerSync,
     testDuplicateHashes,
     testPluginEmbeddingGeneration,
+    testReciprocalRankFusion,
+    testWeightedCombination,
+    testKeywordExtraction,
+    testKeywordBoosting,
+    testLorebookKeywordExtraction,
     fixOrphanedMetadata,
     fixDuplicateHashes
 } from './production-tests.js';
@@ -223,6 +228,16 @@ export async function runDiagnostics(settings, includeProductionTests = false) {
         categories.production.push(await testDuplicateHashes(settings));
         // Plugin-specific embedding generation test (LanceDB/Qdrant)
         categories.production.push(await testPluginEmbeddingGeneration(settings));
+        
+        // Hybrid search tests
+        categories.production.push(await testReciprocalRankFusion(settings));
+        categories.production.push(await testWeightedCombination(settings));
+        
+        // Keyword system tests
+        categories.production.push(await testKeywordExtraction(settings));
+        categories.production.push(await testKeywordBoosting(settings));
+        categories.production.push(await testLorebookKeywordExtraction(settings));
+        
         // Conditional activation returns an array of individual test results
         const activationResults = await testConditionalActivation();
         categories.production.push(...activationResults);

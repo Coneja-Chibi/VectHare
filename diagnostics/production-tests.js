@@ -14,6 +14,8 @@ import { getSavedHashes, purgeVectorIndex } from '../core/core-vector-api.js';
 import { getChatCollectionId } from '../core/chat-vectorization.js';
 import { getModelField, getProviderConfig } from '../core/providers.js';
 import { unregisterCollection } from '../core/collection-loader.js';
+import { reciprocalRankFusion, weightedCombination } from '../core/hybrid-search.js';
+import { applyKeywordBoost, extractTextKeywords, extractLorebookKeywords } from '../core/keyword-boost.js';
 
 /**
  * Full cleanup for test collections - purges vectors AND unregisters from registry
@@ -930,6 +932,535 @@ export async function testPluginEmbeddingGeneration(settings) {
             name: '[PROD] Plugin Embedding Gen',
             status: 'fail',
             message: `Test error: ${error.message}`,
+            category: 'production'
+        };
+    }
+}
+
+/**
+ * Test: Reciprocal Rank Fusion (RRF) algorithm
+ * Tests the core RRF fusion algorithm with known inputs
+ */
+export async function testReciprocalRankFusion(settings) {
+    try {
+        // Mock vector results (high semantic similarity for "dragon")
+        const vectorResults = [
+            { hash: 'doc1', score: 0.95, text: 'The ancient dragon guarded the treasure' },
+            { hash: 'doc2', score: 0.85, text: 'Dragons are mythical creatures' },
+            { hash: 'doc3', score: 0.75, text: 'The warrior fought a dragon' },
+        ];
+
+        // Mock text/BM25 results (high keyword match for "treasure")
+        const textResults = [
+            { hash: 'doc1', bm25Score: 8.5, text: 'The ancient dragon guarded the treasure' },
+            { hash: 'doc4', bm25Score: 7.2, text: 'Treasure hunters searched for gold' },
+            { hash: 'doc5', bm25Score: 5.8, text: 'The treasure map was ancient' },
+        ];
+
+        // Apply RRF with k=60
+        const fusedResults = reciprocalRankFusion([vectorResults, textResults], 60);
+
+        // Validate results
+        if (!Array.isArray(fusedResults) || fusedResults.length === 0) {
+            return {
+                name: '[PROD] RRF Fusion Algorithm',
+                status: 'fail',
+                message: 'RRF returned no results',
+                category: 'production'
+            };
+        }
+
+        // doc1 should rank highest (appears in both lists at high ranks)
+        if (fusedResults[0].result.hash !== 'doc1') {
+            return {
+                name: '[PROD] RRF Fusion Algorithm',
+                status: 'fail',
+                message: `Expected doc1 to rank first, got ${fusedResults[0].result.hash}`,
+                category: 'production'
+            };
+        }
+
+        // Verify all results have RRF scores
+        const hasScores = fusedResults.every(r => 
+            typeof r.rrfScore === 'number' && 
+            r.rrfScore > 0 && 
+            r.rrfScore <= 1.0
+        );
+
+        if (!hasScores) {
+            return {
+                name: '[PROD] RRF Fusion Algorithm',
+                status: 'fail',
+                message: 'Not all results have valid RRF scores (0-1 range)',
+                category: 'production'
+            };
+        }
+
+        // Verify rank information is preserved
+        const hasRanks = fusedResults[0].ranks && 
+            (fusedResults[0].ranks.vector !== undefined || fusedResults[0].ranks.text !== undefined);
+
+        if (!hasRanks) {
+            return {
+                name: '[PROD] RRF Fusion Algorithm',
+                status: 'fail',
+                message: 'Rank information not preserved',
+                category: 'production'
+            };
+        }
+
+        return {
+            name: '[PROD] RRF Fusion Algorithm',
+            status: 'pass',
+            message: `Fused ${fusedResults.length} results, top score: ${fusedResults[0].rrfScore.toFixed(3)}`,
+            category: 'production'
+        };
+    } catch (error) {
+        return {
+            name: '[PROD] RRF Fusion Algorithm',
+            status: 'fail',
+            message: `RRF test error: ${error.message}`,
+            category: 'production'
+        };
+    }
+}
+
+/**
+ * Test: Weighted Linear Combination algorithm
+ * Tests the weighted fusion algorithm with known inputs
+ */
+export async function testWeightedCombination(settings) {
+    try {
+        // Mock vector results
+        const vectorResults = [
+            { hash: 'doc1', score: 0.95, text: 'The ancient dragon' },
+            { hash: 'doc2', score: 0.85, text: 'Dragons are mythical' },
+            { hash: 'doc3', score: 0.75, text: 'Warrior fought dragon' },
+        ];
+
+        // Mock text/BM25 results
+        const textResults = [
+            { hash: 'doc1', bm25Score: 8.5, text: 'The ancient dragon' },
+            { hash: 'doc4', bm25Score: 7.2, text: 'Treasure hunters' },
+            { hash: 'doc3', bm25Score: 6.0, text: 'Warrior fought dragon' },
+        ];
+
+        // Test with equal weights (0.5, 0.5)
+        const fusedResults = weightedCombination(vectorResults, textResults, 0.5, 0.5);
+
+        // Validate results
+        if (!Array.isArray(fusedResults) || fusedResults.length === 0) {
+            return {
+                name: '[PROD] Weighted Combination',
+                status: 'fail',
+                message: 'Weighted combination returned no results',
+                category: 'production'
+            };
+        }
+
+        // All results should have combined scores
+        const hasScores = fusedResults.every(r => 
+            typeof r.combinedScore === 'number' && 
+            r.combinedScore >= 0 && 
+            r.combinedScore <= 1.0
+        );
+
+        if (!hasScores) {
+            return {
+                name: '[PROD] Weighted Combination',
+                status: 'fail',
+                message: 'Not all results have valid combined scores',
+                category: 'production'
+            };
+        }
+
+        // Results should be sorted by combined score
+        const isSorted = fusedResults.every((r, i) => 
+            i === 0 || fusedResults[i-1].combinedScore >= r.combinedScore
+        );
+
+        if (!isSorted) {
+            return {
+                name: '[PROD] Weighted Combination',
+                status: 'fail',
+                message: 'Results not properly sorted by combined score',
+                category: 'production'
+            };
+        }
+
+        // Verify vector and text scores are preserved
+        const hasComponentScores = fusedResults.every(r =>
+            typeof r.vectorScore === 'number' && typeof r.textScore === 'number'
+        );
+
+        if (!hasComponentScores) {
+            return {
+                name: '[PROD] Weighted Combination',
+                status: 'fail',
+                message: 'Component scores not preserved',
+                category: 'production'
+            };
+        }
+
+        return {
+            name: '[PROD] Weighted Combination',
+            status: 'pass',
+            message: `Combined ${fusedResults.length} results, top score: ${fusedResults[0].combinedScore.toFixed(3)}`,
+            category: 'production'
+        };
+    } catch (error) {
+        return {
+            name: '[PROD] Weighted Combination',
+            status: 'fail',
+            message: `Weighted combination test error: ${error.message}`,
+            category: 'production'
+        };
+    }
+}
+
+/**
+ * Test: Keyword extraction from text
+ * Tests TF-IDF based keyword extraction at different levels
+ */
+export async function testKeywordExtraction(settings) {
+    try {
+        const testText = `
+The ancient dragon soared through the sky, its massive wings casting shadows over the kingdom.
+Dragons are legendary creatures known for their wisdom and power. This particular dragon
+had guarded the sacred treasure for centuries, maintaining its vigilant watch over the
+ancient artifacts. Many warriors attempted to challenge the dragon, but none succeeded
+in claiming the legendary treasure that lay within the dragon's mountain fortress.
+        `.trim();
+
+        // Test minimal extraction
+        const minimalKeywords = extractTextKeywords(testText, { 
+            level: 'minimal', 
+            baseWeight: 1.5 
+        });
+
+        if (!Array.isArray(minimalKeywords)) {
+            return {
+                name: '[PROD] Keyword Extraction',
+                status: 'fail',
+                message: 'Keyword extraction did not return an array',
+                category: 'production'
+            };
+        }
+
+        // Minimal should extract limited keywords (max 3)
+        if (minimalKeywords.length > 3) {
+            return {
+                name: '[PROD] Keyword Extraction',
+                status: 'fail',
+                message: `Minimal extraction returned ${minimalKeywords.length} keywords (expected max 3)`,
+                category: 'production'
+            };
+        }
+
+        // Test balanced extraction
+        const balancedKeywords = extractTextKeywords(testText, { 
+            level: 'balanced', 
+            baseWeight: 1.5 
+        });
+
+        // Balanced should extract more keywords (max 8)
+        if (balancedKeywords.length > 8) {
+            return {
+                name: '[PROD] Keyword Extraction',
+                status: 'fail',
+                message: `Balanced extraction returned ${balancedKeywords.length} keywords (expected max 8)`,
+                category: 'production'
+            };
+        }
+
+        // Keywords should have proper structure
+        const hasValidStructure = balancedKeywords.every(kw =>
+            kw.text && typeof kw.text === 'string' &&
+            kw.weight && typeof kw.weight === 'number' &&
+            kw.weight >= 1.0 && kw.weight <= 3.0
+        );
+
+        if (!hasValidStructure) {
+            return {
+                name: '[PROD] Keyword Extraction',
+                status: 'fail',
+                message: 'Keywords do not have valid {text, weight} structure',
+                category: 'production'
+            };
+        }
+
+        // "dragon" should be extracted (appears frequently in text)
+        const hasDragon = balancedKeywords.some(kw => 
+            kw.text.toLowerCase().includes('dragon')
+        );
+
+        if (!hasDragon) {
+            return {
+                name: '[PROD] Keyword Extraction',
+                status: 'warning',
+                message: 'Expected keyword "dragon" not found in balanced extraction',
+                category: 'production'
+            };
+        }
+
+        // Stop words should be filtered out
+        const hasStopWords = balancedKeywords.some(kw =>
+            ['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with'].includes(kw.text)
+        );
+
+        if (hasStopWords) {
+            return {
+                name: '[PROD] Keyword Extraction',
+                status: 'fail',
+                message: 'Stop words were not filtered out',
+                category: 'production'
+            };
+        }
+
+        return {
+            name: '[PROD] Keyword Extraction',
+            status: 'pass',
+            message: `Extracted ${balancedKeywords.length} keywords: [${balancedKeywords.slice(0, 3).map(k => k.text).join(', ')}...]`,
+            category: 'production'
+        };
+    } catch (error) {
+        return {
+            name: '[PROD] Keyword Extraction',
+            status: 'fail',
+            message: `Keyword extraction error: ${error.message}`,
+            category: 'production'
+        };
+    }
+}
+
+/**
+ * Test: Keyword boosting on search results
+ * Tests that keyword matching correctly boosts result scores
+ */
+export async function testKeywordBoosting(settings) {
+    try {
+        // Mock search results with keywords
+        const results = [
+            {
+                hash: 'doc1',
+                text: 'The wizard cast a powerful spell',
+                score: 0.70,
+                keywords: [
+                    { text: 'wizard', weight: 2.0 },
+                    { text: 'spell', weight: 1.5 }
+                ]
+            },
+            {
+                hash: 'doc2',
+                text: 'The ancient tome contained secrets',
+                score: 0.85,
+                keywords: [
+                    { text: 'ancient', weight: 1.5 },
+                    { text: 'tome', weight: 1.8 }
+                ]
+            },
+            {
+                hash: 'doc3',
+                text: 'Magic flows through the realm',
+                score: 0.75,
+                keywords: [
+                    { text: 'magic', weight: 1.7 }
+                ]
+            }
+        ];
+
+        // Query that matches keywords in doc1
+        const query = 'wizard spell';
+        const boosted = applyKeywordBoost(results, query);
+
+        // Validate results
+        if (!Array.isArray(boosted) || boosted.length !== results.length) {
+            return {
+                name: '[PROD] Keyword Boosting',
+                status: 'fail',
+                message: 'Keyword boost returned incorrect number of results',
+                category: 'production'
+            };
+        }
+
+        // Find the boosted document
+        const doc1Boosted = boosted.find(r => r.hash === 'doc1');
+        
+        if (!doc1Boosted) {
+            return {
+                name: '[PROD] Keyword Boosting',
+                status: 'fail',
+                message: 'Could not find doc1 in boosted results',
+                category: 'production'
+            };
+        }
+
+        // Verify doc1 was boosted (should have keywordBoosted flag and higher score)
+        if (!doc1Boosted.keywordBoosted) {
+            return {
+                name: '[PROD] Keyword Boosting',
+                status: 'fail',
+                message: 'Doc1 was not marked as keyword boosted',
+                category: 'production'
+            };
+        }
+
+        // Verify boost was applied correctly
+        // Expected boost: 1 + (2.0 - 1) + (1.5 - 1) = 2.5x
+        const expectedBoost = 2.5;
+        const actualBoost = doc1Boosted.keywordBoost;
+
+        if (Math.abs(actualBoost - expectedBoost) > 0.01) {
+            return {
+                name: '[PROD] Keyword Boosting',
+                status: 'fail',
+                message: `Expected boost ${expectedBoost}x, got ${actualBoost}x`,
+                category: 'production'
+            };
+        }
+
+        // Verify original score is preserved
+        if (doc1Boosted.originalScore !== 0.70) {
+            return {
+                name: '[PROD] Keyword Boosting',
+                status: 'fail',
+                message: 'Original score not preserved',
+                category: 'production'
+            };
+        }
+
+        // Verify new score is correct (0.70 * 2.5 = 1.75, but should be capped or not)
+        const expectedNewScore = 0.70 * 2.5;
+        if (Math.abs(doc1Boosted.score - expectedNewScore) > 0.01) {
+            return {
+                name: '[PROD] Keyword Boosting',
+                status: 'fail',
+                message: `Expected boosted score ${expectedNewScore.toFixed(3)}, got ${doc1Boosted.score.toFixed(3)}`,
+                category: 'production'
+            };
+        }
+
+        // Verify matched keywords are tracked
+        if (!doc1Boosted.matchedKeywords || doc1Boosted.matchedKeywords.length !== 2) {
+            return {
+                name: '[PROD] Keyword Boosting',
+                status: 'fail',
+                message: 'Matched keywords not properly tracked',
+                category: 'production'
+            };
+        }
+
+        // Verify results are re-sorted by boosted score
+        // After boosting, doc1 (0.70 * 2.5 = 1.75) should rank higher than doc2 (0.85)
+        if (boosted[0].hash !== 'doc1') {
+            return {
+                name: '[PROD] Keyword Boosting',
+                status: 'fail',
+                message: `Expected doc1 to rank first after boosting, got ${boosted[0].hash}`,
+                category: 'production'
+            };
+        }
+
+        return {
+            name: '[PROD] Keyword Boosting',
+            status: 'pass',
+            message: `Boosted doc1: ${doc1Boosted.originalScore.toFixed(2)} → ${doc1Boosted.score.toFixed(2)} (${actualBoost}x)`,
+            category: 'production'
+        };
+    } catch (error) {
+        return {
+            name: '[PROD] Keyword Boosting',
+            status: 'fail',
+            message: `Keyword boosting error: ${error.message}`,
+            category: 'production'
+        };
+    }
+}
+
+/**
+ * Test: Lorebook keyword extraction
+ * Tests extraction of keywords from lorebook entries
+ */
+export async function testLorebookKeywordExtraction(settings) {
+    try {
+        // Mock lorebook entry
+        const lorebookEntry = {
+            key: ['dragon', 'wyvern', 'Drake the Ancient'],
+            keysecondary: ['treasure', 'hoard', 'scales'],
+            content: 'A fearsome dragon that guards ancient treasures...'
+        };
+
+        const keywords = extractLorebookKeywords(lorebookEntry);
+
+        // Validate keywords were extracted
+        if (!Array.isArray(keywords) || keywords.length === 0) {
+            return {
+                name: '[PROD] Lorebook Keywords',
+                status: 'fail',
+                message: 'No keywords extracted from lorebook entry',
+                category: 'production'
+            };
+        }
+
+        // Should extract from both key and keysecondary
+        const hasMainKey = keywords.some(k => k === 'dragon' || k === 'wyvern');
+        const hasSecondaryKey = keywords.some(k => k === 'treasure' || k === 'hoard');
+
+        if (!hasMainKey || !hasSecondaryKey) {
+            return {
+                name: '[PROD] Lorebook Keywords',
+                status: 'fail',
+                message: 'Did not extract keywords from both key and keysecondary arrays',
+                category: 'production'
+            };
+        }
+
+        // Keywords should be normalized to lowercase
+        const allLowercase = keywords.every(k => k === k.toLowerCase());
+        if (!allLowercase) {
+            return {
+                name: '[PROD] Lorebook Keywords',
+                status: 'fail',
+                message: 'Keywords not normalized to lowercase',
+                category: 'production'
+            };
+        }
+
+        // Should deduplicate keywords
+        const uniqueKeywords = [...new Set(keywords)];
+        if (uniqueKeywords.length !== keywords.length) {
+            return {
+                name: '[PROD] Lorebook Keywords',
+                status: 'fail',
+                message: 'Keywords not deduplicated',
+                category: 'production'
+            };
+        }
+
+        // Test with empty entry
+        const emptyEntry = { key: [], keysecondary: [] };
+        const emptyKeywords = extractLorebookKeywords(emptyEntry);
+        
+        if (emptyKeywords.length !== 0) {
+            return {
+                name: '[PROD] Lorebook Keywords',
+                status: 'fail',
+                message: 'Empty entry should return no keywords',
+                category: 'production'
+            };
+        }
+
+        return {
+            name: '[PROD] Lorebook Keywords',
+            status: 'pass',
+            message: `Extracted ${keywords.length} keywords: [${keywords.slice(0, 3).join(', ')}...]`,
+            category: 'production'
+        };
+    } catch (error) {
+        return {
+            name: '[PROD] Lorebook Keywords',
+            status: 'fail',
+            message: `Lorebook keyword extraction error: ${error.message}`,
             category: 'production'
         };
     }

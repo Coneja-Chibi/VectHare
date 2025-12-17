@@ -2901,14 +2901,14 @@ function bindSearchEvents() {
 async function scanKeywords() {
   const $btn = $("#vecthare_scan_keywords");
   const $tags = $("#vecthare_keyword_tags");
-  
+
   $btn.prop("disabled", true).html('<i class="fa-solid fa-spinner fa-spin"></i> Scanning...');
   $tags.html('<span class="vecthare-keyword-hint">Scanning collections...</span>');
 
   try {
     const enabledOnly = $("#vecthare_search_enabled_only").is(":checked");
     let collectionsToScan = browserState.collections;
-    
+
     if (enabledOnly) {
       collectionsToScan = collectionsToScan.filter(c => c.enabled);
     }
@@ -2954,7 +2954,7 @@ async function scanKeywords() {
       .map(([text, count]) => ({ text, count }));
 
     renderKeywordTags();
-    
+
     if (browserState.availableKeywords.length === 0) {
       $tags.html('<span class="vecthare-keyword-hint">No keywords found in scanned collections</span>');
     } else {
@@ -2975,7 +2975,7 @@ async function scanKeywords() {
 function renderKeywordTags() {
   const $tags = $("#vecthare_keyword_tags");
   const keywords = browserState.availableKeywords;
-  
+
   if (keywords.length === 0) {
     $tags.html('<span class="vecthare-keyword-hint">No keywords available</span>');
     return;
@@ -2987,8 +2987,8 @@ function renderKeywordTags() {
 
   let html = displayKeywords.map(kw => {
     const isActive = currentFilter.includes(kw.text);
-    return `<span class="vecthare-keyword-tag ${isActive ? 'active' : ''}" 
-                  data-keyword="${escapeHtml(kw.text)}" 
+    return `<span class="vecthare-keyword-tag ${isActive ? 'active' : ''}"
+                  data-keyword="${escapeHtml(kw.text)}"
                   title="${kw.count} occurrence(s)">
               ${escapeHtml(kw.text)} <small>(${kw.count})</small>
             </span>`;
@@ -3013,13 +3013,13 @@ function renderKeywordTags() {
 function toggleKeywordFilter(keyword) {
   const currentFilter = browserState.keywordFilter.toLowerCase().split(',').map(k => k.trim()).filter(Boolean);
   const idx = currentFilter.indexOf(keyword.toLowerCase());
-  
+
   if (idx >= 0) {
     currentFilter.splice(idx, 1);
   } else {
     currentFilter.push(keyword.toLowerCase());
   }
-  
+
   browserState.keywordFilter = currentFilter.join(', ');
   $("#vecthare_keyword_filter").val(browserState.keywordFilter);
   renderKeywordTags();
@@ -3052,34 +3052,34 @@ function filterResultsByKeywords(results) {
     .split(',')
     .map(k => k.trim())
     .filter(Boolean);
-  
+
   if (filterKeywords.length === 0) {
     return results;
   }
 
   const filtered = {};
-  
+
   for (const [collectionId, collectionResults] of Object.entries(results)) {
     if (!collectionResults?.hashes?.length) continue;
-    
+
     const filteredHashes = [];
     const filteredMetadata = [];
-    
+
     for (let i = 0; i < collectionResults.hashes.length; i++) {
       const metadata = collectionResults.metadata?.[i] || {};
-      const chunkKeywords = (metadata.keywords || []).map(kw => 
+      const chunkKeywords = (metadata.keywords || []).map(kw =>
         (typeof kw === 'object' ? kw.text : kw)?.toLowerCase()
       ).filter(Boolean);
-      
+
       // Check if chunk has ANY of the filter keywords
       const hasMatch = filterKeywords.some(fk => chunkKeywords.includes(fk));
-      
+
       if (hasMatch) {
         filteredHashes.push(collectionResults.hashes[i]);
         filteredMetadata.push(metadata);
       }
     }
-    
+
     if (filteredHashes.length > 0) {
       filtered[collectionId] = {
         hashes: filteredHashes,
@@ -3087,7 +3087,7 @@ function filterResultsByKeywords(results) {
       };
     }
   }
-  
+
   return filtered;
 }
 
@@ -3146,7 +3146,7 @@ async function performSearch() {
     );
 
     browserState.searchResults = results;
-    
+
     // Apply keyword filter if set
     const filteredResults = filterResultsByKeywords(results);
     renderSearchResults(filteredResults, query, results);
@@ -3180,15 +3180,15 @@ function renderSearchResults(results, query, originalResults = null) {
 
   // Calculate original counts if keyword filter was applied
   const wasFiltered = originalResults && browserState.keywordFilter.trim();
-  const originalTotal = originalResults 
+  const originalTotal = originalResults
     ? Object.keys(originalResults).reduce((sum, id) => sum + (originalResults[id]?.hashes?.length || 0), 0)
     : totalResults;
 
   if (totalResults === 0) {
-    const filterMsg = wasFiltered 
+    const filterMsg = wasFiltered
       ? `<p>No results match keyword filter: "${escapeHtml(browserState.keywordFilter)}"</p><small>${originalTotal} result(s) found before filtering</small>`
       : `<p>No results found for "${escapeHtml(query)}"</p><small>Try adjusting the score threshold or search in more collections</small>`;
-    
+
     $("#vecthare_search_results").html(`
             <div class="vecthare-search-empty">
                 ${icons.search(48)}

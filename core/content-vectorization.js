@@ -24,7 +24,7 @@ import {
     buildDocumentCollectionId,
     COLLECTION_PREFIXES,
 } from './collection-ids.js';
-import { extractLorebookKeywords, extractTextKeywords, extractChatKeywords, EXTRACTION_LEVELS, DEFAULT_EXTRACTION_LEVEL, DEFAULT_BASE_WEIGHT } from './keyword-boost.js';
+import { extractLorebookKeywords, extractTextKeywords, extractChatKeywords, extractBM25Keywords, EXTRACTION_LEVELS, DEFAULT_EXTRACTION_LEVEL, DEFAULT_BASE_WEIGHT } from './keyword-boost.js';
 import { cleanText, cleanMessages } from './text-cleaning.js';
 import { progressTracker } from '../ui/progress-tracker.js';
 import { extension_settings, getContext } from '../../../../extensions.js';
@@ -715,9 +715,10 @@ function enrichChunks(chunks, contentType, source, settings, preparedContent) {
                 keywords = keywords.concat(autoKeywords);
             }
         } else if (contentType === 'chat') {
-            // For chat, use proper noun detection (capitalized words mid-sentence)
+            // For chat, use BM25/TF-IDF to find most distinctive words
             if (keywordLevel !== 'off') {
-                keywords = extractChatKeywords(chunkText, {
+                keywords = extractBM25Keywords(chunkText, {
+                    level: keywordLevel,
                     baseWeight: keywordBaseWeight,
                 });
             }

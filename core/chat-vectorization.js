@@ -13,7 +13,7 @@ import { getCurrentChatId, is_send_press, setExtensionPrompt, substituteParams, 
 import { getContext } from '../../../../extensions.js';
 import { getStringHash as calculateHash, waitUntilCondition, onlyUnique } from '../../../../utils.js';
 import { isUnitStrategy } from './chunking.js';
-import { extractChatKeywords } from './keyword-boost.js';
+import { extractChatKeywords, extractBM25Keywords } from './keyword-boost.js';
 import { cleanText } from './text-cleaning.js';
 import {
     getSavedHashes,
@@ -137,10 +137,17 @@ function prepareItemsForInsertion(items) {
  * @param {object[]} messages Messages to group
  * @param {string} strategy Chunking strategy: 'per_message', 'conversation_turns', 'message_batch'
  * @param {number} batchSize Number of messages per batch (for message_batch strategy)
+ * @param {string} keywordLevel Keyword extraction level: 'off', 'minimal', 'balanced', 'aggressive'
  * @returns {object[]} Grouped message items ready for chunking
  */
-function groupMessagesByStrategy(messages, strategy, batchSize = 4) {
+function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel = 'balanced') {
     if (!messages.length) return [];
+
+    // Helper to extract keywords based on level
+    const getKeywords = (text) => {
+        if (keywordLevel === 'off') return [];
+        return extractBM25Keywords(text, { level: keywordLevel });
+    };
 
     switch (strategy) {
         case 'conversation_turns': {
@@ -161,7 +168,7 @@ function groupMessagesByStrategy(messages, strategy, batchSize = 4) {
                     text: combinedText,
                     hash: getStringHash(combinedText),
                     index: messages[i].index,
-                    keywords: extractChatKeywords(combinedText),
+                    keywords: getKeywords(combinedText),
                     metadata: {
                         strategy: 'conversation_turns',
                         messageIds: pair.map(m => m.index),
@@ -189,7 +196,7 @@ function groupMessagesByStrategy(messages, strategy, batchSize = 4) {
                     text: combinedText,
                     hash: getStringHash(combinedText),
                     index: batch[0].index,
-                    keywords: extractChatKeywords(combinedText),
+                    keywords: getKeywords(combinedText),
                     metadata: {
                         strategy: 'message_batch',
                         batchSize: batch.length,
@@ -211,7 +218,7 @@ function groupMessagesByStrategy(messages, strategy, batchSize = 4) {
                 hash: m.hash,
                 index: m.index,
                 is_user: m.is_user,
-                keywords: extractChatKeywords(m.text),
+                keywords: getKeywords(m.text),
                 metadata: {
                     strategy: 'per_message',
                     messageId: m.index,
@@ -439,7 +446,8 @@ export async function synchronizeChat(settings, batchSize = 5) {
         }
 
         // Group messages according to strategy
-        const groupedItems = groupMessagesByStrategy(allMessages, strategy, strategyBatchSize);
+        const keywordLevel = settings.keyword_extraction_level || 'balanced';
+        const groupedItems = groupMessagesByStrategy(allMessages, strategy, strategyBatchSize, keywordLevel);
 
         // Filter out already vectorized items (by their grouped hash)
         const queue = new Queue();
@@ -672,7 +680,11 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
                     text: text,
                     index: meta.messageId || meta.index || 0,
                     collectionId: collectionId,
-                    decayApplied: false
+                    decayApplied: false,
+                    // Hybrid search scores
+                    vectorScore: meta.vectorScore,
+                    textScore: meta.textScore,
+                    hybridSearch: meta.hybridSearch
                 };
             });
 
@@ -1332,13 +1344,6 @@ function deduplicateChunks(chunks, chat, settings, debugData) {
  * @returns {string} Formatted injection text
  */
 function buildNestedInjectionText(chunks, settings) {
-    console.log(`[VectHare buildNestedInjectionText] Building injection text for ${chunks.length} chunks`);
-    
-    // Log each chunk's text content for debugging
-    chunks.forEach((chunk, idx) => {
-        console.log(`[VectHare buildNestedInjectionText] Chunk ${idx + 1}: text length=${chunk.text?.length || 0}, preview="${(chunk.text || '').substring(0, 100)}..."`);
-    });
-    
     // Group chunks by collection
     const byCollection = new Map();
     for (const chunk of chunks) {
@@ -1410,9 +1415,6 @@ function buildNestedInjectionText(chunks, settings) {
     if (globalXmlTag) {
         fullText = `<${globalXmlTag}>\n${fullText}\n</${globalXmlTag}>`;
     }
-
-    console.log(`[VectHare buildNestedInjectionText] Final text length: ${fullText.length}`);
-    console.log(`[VectHare buildNestedInjectionText] Final text:\n${fullText.substring(0, 500)}${fullText.length > 500 ? '...' : ''}`);
 
     return fullText;
 }
@@ -1488,21 +1490,10 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
 
         console.log(`[VectHare Injection Control] Single position injection: position="${group.position}", depth=${group.depth}, chunks=${group.chunks.length}, textLength=${insertedText.length}`);
         console.log(`[VectHare Injection Control] Injection text preview: "${insertedText.substring(0, 200)}${insertedText.length > 200 ? '...' : ''}"`);
-        console.log(`[VectHare Injection Control] 🔧 Calling setExtensionPrompt with:`, {
-            tag: EXTENSION_PROMPT_TAG,
-            textLength: insertedText.length,
-            position: group.position,
-            positionType: typeof group.position,
-            depth: group.depth,
-            depthType: typeof group.depth
-        });
 
         setExtensionPrompt(EXTENSION_PROMPT_TAG, insertedText, group.position, group.depth, false);
 
-        // Verify injection immediately after
-        console.log(`[VectHare Injection Control] 🔍 Verifying extension_prompts after setExtensionPrompt...`);
-        console.log(`[VectHare Injection Control] extension_prompts keys:`, Object.keys(extension_prompts));
-        
+        // Verify injection
         const verifiedPrompt = extension_prompts[EXTENSION_PROMPT_TAG];
         const injectionVerified = verifiedPrompt && verifiedPrompt.value === insertedText;
 
@@ -1664,6 +1655,15 @@ export async function rearrangeChat(chat, settings, type) {
             return;
         }
 
+        // === STAGE 2.5: Extract keywords from query message ===
+        const extractionLevel = settings.keyword_extraction_level || 'balanced';
+        const queryKeywords = extractChatKeywords(queryText, {
+            level: extractionLevel,
+            baseWeight: settings.keyword_boost_base_weight || 1.5
+        });
+        const queryKeywordTexts = queryKeywords.map(kw => kw.text.toLowerCase());
+        console.log(`VectHare: Extracted ${queryKeywords.length} keywords from query:`, queryKeywordTexts);
+
         // === STAGE 3: Filter by activation conditions ===
         let activeCollections = [];
         if (hasCollections) {
@@ -1691,6 +1691,7 @@ export async function rearrangeChat(chat, settings, type) {
         // === INITIALIZE DEBUG DATA ===
         const debugData = createDebugData();
         debugData.query = queryText;
+        debugData.queryKeywords = queryKeywordTexts;
         debugData.collectionId = activeCollections.length > 0 ? activeCollections.join(', ') : 'world_info_only';
         debugData.collectionsQueried = activeCollections;
         const effectiveTopK = settings.top_k ?? settings.insert;
@@ -1712,6 +1713,50 @@ export async function rearrangeChat(chat, settings, type) {
 
         // === STAGE 4: Query all collections and merge results ===
         let chunks = await queryAndMergeCollections(activeCollections, queryText, settings, chat, debugData);
+
+        // === STAGE 4.3: Boost chunks with matching query keywords ===
+        if (queryKeywordTexts.length > 0 && chunks.length > 0) {
+            let keywordMatchCount = 0;
+
+            for (const chunk of chunks) {
+                // Get chunk keywords from metadata
+                const chunkKeywords = (chunk.metadata?.keywords || [])
+                    .map(kw => (typeof kw === 'object' ? kw.text : kw)?.toLowerCase())
+                    .filter(Boolean);
+
+                // Check if chunk has any matching keywords
+                const matchedKeywords = queryKeywordTexts.filter(qk => chunkKeywords.includes(qk));
+
+                if (matchedKeywords.length > 0) {
+                    // Chunk matches query keywords - boost to perfect hit
+                    const oldScore = chunk.score;
+                    chunk.keywordMatched = true;
+                    chunk.matchedQueryKeywords = matchedKeywords;
+                    chunk.score = 1.0; // 100% perfect match
+                    chunk.originalScore = oldScore;
+                    keywordMatchCount++;
+
+                    addTrace(debugData, 'keyword_boost', `Chunk boosted by ${matchedKeywords.length} keyword(s)`, {
+                        hash: chunk.hash,
+                        matchedKeywords,
+                        newScore: 1.0,
+                        oldScore
+                    });
+                }
+            }
+
+            if (keywordMatchCount > 0) {
+                console.log(`VectHare: Boosted ${keywordMatchCount}/${chunks.length} chunks with matching keywords to 100% score`);
+                debugData.stages.afterKeywordBoost = [...chunks];
+                debugData.stats.keywordBoosted = keywordMatchCount;
+                addTrace(debugData, 'keyword_boost', `Boosted ${keywordMatchCount} chunks with keyword matches`, {
+                    totalChunks: chunks.length,
+                    boostedCount: keywordMatchCount
+                });
+            } else {
+                console.log(`VectHare: No chunks matched query keywords, all ${chunks.length} chunks keep original scores`);
+            }
+        }
 
         // === WORLD INFO: Semantic WI entries ===
         try {
@@ -1870,18 +1915,6 @@ export async function rearrangeChat(chat, settings, type) {
 
         setLastSearchDebug(debugData);
         console.log(`VectHare: ✅ Injected ${chunksToInject.length} chunks (${skippedDuplicates.length} skipped - already in context)`);
-
-        // Final state dump for debugging
-        console.log(`[VectHare] 🔍 FINAL extension_prompts state after rearrangeChat:`, {
-            keys: Object.keys(extension_prompts),
-            vecthareTag: EXTENSION_PROMPT_TAG,
-            vectharePrompt: extension_prompts[EXTENSION_PROMPT_TAG] ? {
-                hasValue: !!extension_prompts[EXTENSION_PROMPT_TAG].value,
-                valueLength: extension_prompts[EXTENSION_PROMPT_TAG].value?.length,
-                position: extension_prompts[EXTENSION_PROMPT_TAG].position,
-                depth: extension_prompts[EXTENSION_PROMPT_TAG].depth
-            } : 'NOT FOUND'
-        });
 
     } catch (error) {
         toastr.error(`Generation interceptor aborted: ${error.message}`, 'VectHare');

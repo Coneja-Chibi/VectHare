@@ -101,6 +101,17 @@ const defaultSettings = {
     bm25_k1: 1.5,  // Term frequency saturation (1.2-2.0 typical)
     bm25_b: 0.75,  // Length normalization (0-1, 0.75 typical)
 
+    // Keyword extraction level for chat messages
+    keyword_extraction_level: 'balanced', // 'off', 'minimal', 'balanced', 'aggressive'
+
+    // Hybrid Search settings (combines vector + full-text search)
+    hybrid_search_enabled: false,       // Enable hybrid search mode
+    hybrid_fusion_method: 'rrf',        // 'rrf' (Reciprocal Rank Fusion) or 'weighted'
+    hybrid_vector_weight: 0.5,          // Weight for vector scores (0-1) - used in weighted mode
+    hybrid_text_weight: 0.5,            // Weight for text/BM25 scores (0-1) - used in weighted mode
+    hybrid_rrf_k: 60,                   // RRF constant (higher = more weight to top results)
+    hybrid_native_prefer: true,         // Prefer native backend hybrid if available (Qdrant/Milvus)
+
     // Advanced features
     temporal_decay: getDefaultDecaySettings(),
 

@@ -60,6 +60,7 @@ function getProviderSpecificParams(settings, isQuery = false) {
             params.apiUrl = settings.use_alt_endpoint
                 ? settings.alt_endpoint_url
                 : textgenerationwebui_settings.server_urls[textgen_types.LLAMACPP];
+            console.log(`VectHare DEBUG llamacpp: use_alt_endpoint=${settings.use_alt_endpoint}, alt_endpoint_url="${settings.alt_endpoint_url}", ST_url="${textgenerationwebui_settings.server_urls[textgen_types.LLAMACPP]}", final apiUrl="${params.apiUrl}"`);
             break;
 
         case 'vllm':
@@ -107,8 +108,10 @@ export class StandardBackend extends VectorBackend {
 
     async initialize(settings) {
         // Check if plugin is available
+        console.log('VectHare DEBUG: Checking plugin availability...');
         try {
             const response = await fetch('/api/plugins/similharity/health');
+            console.log('VectHare DEBUG: Plugin health check response:', response.status, response.ok);
             this.pluginAvailable = response.ok;
 
             if (this.pluginAvailable) {
@@ -118,12 +121,13 @@ export class StandardBackend extends VectorBackend {
                 });
                 console.log('VectHare: Standard backend initialized (plugin available)');
             } else {
-                console.log('VectHare: Standard backend initialized (native ST API only)');
+                console.log('VectHare: Standard backend initialized (native ST API only - health check failed)');
             }
         } catch (e) {
-            console.log('VectHare: Standard backend initialized (native ST API only)');
+            console.log('VectHare: Standard backend initialized (native ST API only - error:', e.message, ')');
             this.pluginAvailable = false;
         }
+        
     }
 
     async healthCheck() {
@@ -182,7 +186,7 @@ export class StandardBackend extends VectorBackend {
 
     /**
      * Insert vector items into a collection
-     * Uses native ST API
+     * Uses plugin API if available (for metadata support), falls back to native ST API
      */
     async insertVectorItems(collectionId, items, settings) {
         if (items.length === 0) return;
@@ -191,14 +195,7 @@ export class StandardBackend extends VectorBackend {
         const model = getModelFromSettings(settings);
 
         // Log chunk statistics for debugging OOM issues
-        const textLengths = items.map(item => {
-            let text = item.text || '';
-            if (item.keywords && item.keywords.length > 0) {
-                const keywordTexts = item.keywords.map(kw => kw.text || kw).join(' ');
-                text += ` [KEYWORDS: ${keywordTexts}]`;
-            }
-            return text.length;
-        });
+        const textLengths = items.map(item => (item.text || '').length);
         const maxLen = Math.max(...textLengths);
         const avgLen = Math.round(textLengths.reduce((a, b) => a + b, 0) / textLengths.length);
         const longestChunkIndex = textLengths.indexOf(maxLen);
@@ -208,6 +205,11 @@ export class StandardBackend extends VectorBackend {
 
         console.log(`VectHare: Embedding ${items.length} chunks (avg: ${avgLen} chars, max: ${maxLen} chars at index ${longestChunkIndex}) - ${chunksWithKeywords} chunks have keywords`);
 
+        // Debug: Log first chunk's keywords if any
+        if (chunksWithKeywords > 0) {
+            const firstChunkWithKeywords = items.find(item => item.keywords && item.keywords.length > 0);
+            console.log(`VectHare DEBUG: First chunk keywords:`, firstChunkWithKeywords.keywords);
+        }
 
         // Warn if chunks are unusually large (potential OOM risk)
         if (maxLen > 2000) {
@@ -216,38 +218,70 @@ export class StandardBackend extends VectorBackend {
         }
 
         try {
-            const response = await fetch('/api/vector/insert', {
+            // Try plugin API first (supports metadata) - fallback to native API if unavailable
+            console.log('VectHare DEBUG: this.pluginAvailable =', this.pluginAvailable);
+            let usePluginApi = this.pluginAvailable;
+            let endpoint = usePluginApi ? '/api/plugins/similharity/chunks/insert' : '/api/vector/insert';
+
+            console.log(`VectHare DEBUG: Using ${usePluginApi ? 'PLUGIN' : 'NATIVE'} API for insertion (${endpoint})`);
+            
+            // Warn if keywords will be lost
+            if (!usePluginApi && chunksWithKeywords > 0) {
+                console.warn(`⚠️ VectHare: ${chunksWithKeywords} chunks have keywords, but native ST API doesn't support metadata!`);
+                console.warn(`⚠️ VectHare: Install the Similharity plugin to save keywords: https://github.com/SillyTavern/SillyTavern-Extras-Similharity-plugin`);
+            }
+
+            const payload = usePluginApi ? {
+                backend: 'vectra',
+                collectionId: collectionId,
+                items: items.map(item => {
+                    const mappedItem = {
+                        hash: item.hash,
+                        text: item.text || '',
+                        index: item.index ?? 0,
+                        vector: item.vector,
+                        metadata: {
+                            ...item.metadata,
+                            keywords: item.keywords || [],
+                            importance: item.importance,
+                            customWeights: item.customWeights,
+                            disabledKeywords: item.disabledKeywords,
+                            chunkGroup: item.chunkGroup,
+                            conditions: item.conditions,
+                            summary: item.summary,
+                            isSummaryChunk: item.isSummaryChunk,
+                            parentHash: item.parentHash,
+                        },
+                    };
+                    // Debug: Log first item's metadata
+                    if (item === items[0] && item.keywords?.length > 0) {
+                        console.log(`VectHare DEBUG: First item metadata being sent:`, mappedItem.metadata);
+                    }
+                    return mappedItem;
+                }),
+                source: settings.source || 'transformers',
+                model: model,
+            } : {
+                collectionId: collectionId,
+                items: items.map(item => ({
+                    hash: item.hash,
+                    text: item.text || '',
+                    index: item.index ?? 0,
+                })),
+                source: settings.source || 'transformers',
+                model: model,
+                // Pass embeddings if pre-computed (for webllm, koboldcpp, bananabread)
+                embeddings: items[0]?.vector ? Object.fromEntries(items.map(i => [
+                    i.text || '',
+                    i.vector
+                ])) : undefined,
+                ...providerParams,
+            };
+
+            const response = await fetch(endpoint, {
                 method: 'POST',
                 headers: getRequestHeaders(),
-                body: JSON.stringify({
-                    collectionId: collectionId,
-                    items: items.map(item => {
-                        // Include keywords in the text for embedding/indexing
-                        let textWithKeywords = item.text || '';
-                        if (item.keywords && item.keywords.length > 0) {
-                            const keywordTexts = item.keywords.map(kw => kw.text || kw).join(' ');
-                            textWithKeywords += ` [KEYWORDS: ${keywordTexts}]`;
-                        }
-
-                        return {
-                            hash: item.hash,
-                            text: textWithKeywords,
-                            index: item.index ?? 0,
-                        };
-                    }),
-                    source: settings.source || 'transformers',
-                    model: model,
-                    // Pass embeddings if pre-computed (for webllm, koboldcpp, bananabread)
-                    embeddings: items[0]?.vector ? Object.fromEntries(items.map(i => {
-                        let textWithKeywords = i.text || '';
-                        if (i.keywords && i.keywords.length > 0) {
-                            const keywordTexts = i.keywords.map(kw => kw.text || kw).join(' ');
-                            textWithKeywords += ` [KEYWORDS: ${keywordTexts}]`;
-                        }
-                        return [textWithKeywords, i.vector];
-                    })) : undefined,
-                    ...providerParams,
-                }),
+                body: JSON.stringify(payload),
             });
 
             if (!response.ok) {

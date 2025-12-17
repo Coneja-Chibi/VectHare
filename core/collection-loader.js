@@ -349,7 +349,7 @@ async function discoverViaPlugin(settings) {
 
             for (const collection of data.collections) {
                 const backend = collection.backend || 'standard';
-                
+
                 // Strip backend prefix from collection.id if it's already there
                 // Some backends (like Qdrant) may return IDs with backend prefix
                 let collectionId = collection.id;
@@ -357,7 +357,7 @@ async function discoverViaPlugin(settings) {
                     collectionId = collectionId.substring(backend.length + 1);
                     console.debug(`   🔧 Stripped backend prefix from collection ID: ${collection.id} → ${collectionId}`);
                 }
-                
+
                 console.debug(`   - ${backend}:${collection.source}:${collectionId} (${collection.chunkCount} chunks)`);
 
                 const collectionData = {
@@ -394,26 +394,26 @@ async function discoverViaPlugin(settings) {
             const migratedEntries = [];
             for (const oldKey of [...currentRegistry]) {
                 const parsed = parseRegistryKey(oldKey);
-                
+
                 // If already in new format (has backend), keep it
                 if (parsed.backend) {
                     continue;
                 }
-                
+
                 // Old format - try to find matching collection from plugin
                 const collectionId = parsed.collectionId;
                 const oldSource = parsed.source;
-                
+
                 // Find all plugin collections matching this ID
                 const matchingPluginKeys = uniqueKeys.filter(key => {
                     const parts = key.split(':');
                     const pluginId = parts.slice(2).join(':');  // backend:source:id -> id
                     const pluginSource = parts[1];
-                    
+
                     // Match by ID and source (if source was known)
                     return pluginId === collectionId && (!oldSource || pluginSource === oldSource);
                 });
-                
+
                 if (matchingPluginKeys.length > 0) {
                     console.debug(`   🔄 Migrating: ${oldKey} -> ${matchingPluginKeys.join(', ')}`);
                     unregisterCollection(oldKey);
@@ -423,7 +423,7 @@ async function discoverViaPlugin(settings) {
                     console.debug(`   ❓ No matching plugin collection for old entry: ${oldKey}`);
                 }
             }
-            
+
             if (migratedEntries.length > 0) {
                 console.log(`   ✅ Migrated ${migratedEntries.length} old registry entries to new format`);
             }
@@ -646,7 +646,7 @@ export async function doesChatHaveVectors(settings, overrideChatId, overrideUUID
             let chunkCount = 0;
             let source = parsed.source || 'unknown';
             let backend = parsed.backend || 'standard';
-            
+
             if (pluginCollectionData && pluginCollectionData[registryKey]) {
                 const cacheData = pluginCollectionData[registryKey];
                 chunkCount = cacheData.chunkCount || 0;
@@ -879,20 +879,35 @@ export { setCollectionEnabled, isCollectionEnabled } from './collection-metadata
  */
 export async function loadCollectionChunks(collectionId, settings) {
     const context = getContext();
-    const hashes = await getSavedHashes(collectionId, settings);
+    const result = await getSavedHashes(collectionId, settings, true); // includeMetadata = true
+
+    console.log(`VectHare DEBUG: loadCollectionChunks result type:`, Array.isArray(result) ? 'array' : 'object');
+    if (!Array.isArray(result)) {
+        console.log(`VectHare DEBUG: result.metadata length:`, result.metadata?.length);
+        if (result.metadata?.length > 0) {
+            console.log(`VectHare DEBUG: First item metadata:`, result.metadata[0]);
+        }
+    }
+
+    // Handle both old format (array) and new format (object with hashes + metadata)
+    const hashes = Array.isArray(result) ? result : result.hashes;
+    const metadataArray = result.metadata || [];
 
     if (hashes.length === 0) {
         return [];
     }
 
     const chunks = [];
-    const metadata = parseCollectionId(collectionId);
+    const collectionMetadata = parseCollectionId(collectionId);
 
     // For chat collections, we can get text from chat messages
-    if (metadata.type === 'chat' && context.chatId === metadata.rawId) {
+    if (collectionMetadata.type === 'chat' && context.chatId === collectionMetadata.rawId) {
         const chat = context.chat;
 
-        for (const hash of hashes) {
+        for (let i = 0; i < hashes.length; i++) {
+            const hash = hashes[i];
+            const dbMetadata = metadataArray[i] || {};
+
             // Find message by hash
             const message = chat.find(msg => {
                 if (!msg.mes || msg.is_system) return false;
@@ -907,7 +922,10 @@ export async function loadCollectionChunks(collectionId, settings) {
                     index: chat.indexOf(message),
                     metadata: {
                         messageId: chat.indexOf(message),
-                        source: 'chat'
+                        source: 'chat',
+                        // Include keywords and other metadata from DB
+                        keywords: dbMetadata.keywords || [],
+                        ...dbMetadata
                     }
                 });
             }
@@ -917,14 +935,19 @@ export async function loadCollectionChunks(collectionId, settings) {
         // and retrieved via the chunks visualizer's query functionality
         console.warn(`VectHare: Cannot load chunk text for non-active collection: ${collectionId}`);
 
-        // Return minimal data
-        for (const hash of hashes) {
+        // Return minimal data with metadata
+        for (let i = 0; i < hashes.length; i++) {
+            const hash = hashes[i];
+            const dbMetadata = metadataArray[i] || {};
+
             chunks.push({
-                text: '(Text not available - collection not active)',
+                text: dbMetadata.text || '(Text not available - collection not active)',
                 hash: hash,
                 index: -1,
                 metadata: {
-                    source: metadata.type
+                    source: collectionMetadata.type,
+                    keywords: dbMetadata.keywords || [],
+                    ...dbMetadata
                 }
             });
         }

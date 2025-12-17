@@ -1655,6 +1655,15 @@ export async function rearrangeChat(chat, settings, type) {
             return;
         }
 
+        // === STAGE 2.5: Extract keywords from query message ===
+        const extractionLevel = settings.keyword_extraction_level || 'balanced';
+        const queryKeywords = extractChatKeywords(queryText, {
+            level: extractionLevel,
+            baseWeight: settings.keyword_boost_base_weight || 1.5
+        });
+        const queryKeywordTexts = queryKeywords.map(kw => kw.text.toLowerCase());
+        console.log(`VectHare: Extracted ${queryKeywords.length} keywords from query:`, queryKeywordTexts);
+
         // === STAGE 3: Filter by activation conditions ===
         let activeCollections = [];
         if (hasCollections) {
@@ -1682,6 +1691,7 @@ export async function rearrangeChat(chat, settings, type) {
         // === INITIALIZE DEBUG DATA ===
         const debugData = createDebugData();
         debugData.query = queryText;
+        debugData.queryKeywords = queryKeywordTexts;
         debugData.collectionId = activeCollections.length > 0 ? activeCollections.join(', ') : 'world_info_only';
         debugData.collectionsQueried = activeCollections;
         const effectiveTopK = settings.top_k ?? settings.insert;
@@ -1703,6 +1713,50 @@ export async function rearrangeChat(chat, settings, type) {
 
         // === STAGE 4: Query all collections and merge results ===
         let chunks = await queryAndMergeCollections(activeCollections, queryText, settings, chat, debugData);
+
+        // === STAGE 4.3: Boost chunks with matching query keywords ===
+        if (queryKeywordTexts.length > 0 && chunks.length > 0) {
+            let keywordMatchCount = 0;
+
+            for (const chunk of chunks) {
+                // Get chunk keywords from metadata
+                const chunkKeywords = (chunk.metadata?.keywords || [])
+                    .map(kw => (typeof kw === 'object' ? kw.text : kw)?.toLowerCase())
+                    .filter(Boolean);
+
+                // Check if chunk has any matching keywords
+                const matchedKeywords = queryKeywordTexts.filter(qk => chunkKeywords.includes(qk));
+
+                if (matchedKeywords.length > 0) {
+                    // Chunk matches query keywords - boost to perfect hit
+                    const oldScore = chunk.score;
+                    chunk.keywordMatched = true;
+                    chunk.matchedQueryKeywords = matchedKeywords;
+                    chunk.score = 1.0; // 100% perfect match
+                    chunk.originalScore = oldScore;
+                    keywordMatchCount++;
+
+                    addTrace(debugData, 'keyword_boost', `Chunk boosted by ${matchedKeywords.length} keyword(s)`, {
+                        hash: chunk.hash,
+                        matchedKeywords,
+                        newScore: 1.0,
+                        oldScore
+                    });
+                }
+            }
+
+            if (keywordMatchCount > 0) {
+                console.log(`VectHare: Boosted ${keywordMatchCount}/${chunks.length} chunks with matching keywords to 100% score`);
+                debugData.stages.afterKeywordBoost = [...chunks];
+                debugData.stats.keywordBoosted = keywordMatchCount;
+                addTrace(debugData, 'keyword_boost', `Boosted ${keywordMatchCount} chunks with keyword matches`, {
+                    totalChunks: chunks.length,
+                    boostedCount: keywordMatchCount
+                });
+            } else {
+                console.log(`VectHare: No chunks matched query keywords, all ${chunks.length} chunks keep original scores`);
+            }
+        }
 
         // === WORLD INFO: Semantic WI entries ===
         try {

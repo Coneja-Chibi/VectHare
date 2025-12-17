@@ -406,7 +406,7 @@ function createPipelineStage(label, count, fromCount, icon, colorClass, disabled
 function createKeywordBoostStage(data) {
     const chunks = data.stages.initial || [];
     const boostedCount = chunks.filter(c => c.keywordMatched || c.keywordBoosted || (c.keywordBoost && c.keywordBoost > 1)).length;
-    
+
     // Count total matched query keywords across all chunks
     const totalMatchedQueryKeywords = chunks.reduce((sum, c) => {
         return sum + (c.matchedQueryKeywords?.length || 0);

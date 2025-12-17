@@ -952,6 +952,93 @@
 }
 
 /* ============================================================================
+ * HYBRID SEARCH SCORE BREAKDOWN
+ * ============================================================================ */
+
+.vecthare-hybrid-breakdown {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.vecthare-hybrid-scores {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.vecthare-score-vector-badge {
+    color: #60a5fa;
+    font-weight: 600;
+    padding: 2px 8px;
+    background: color-mix(in srgb, #60a5fa 15%, transparent);
+    border-radius: 4px;
+}
+
+.vecthare-score-text-badge {
+    color: #34d399;
+    font-weight: 600;
+    padding: 2px 8px;
+    background: color-mix(in srgb, #34d399 15%, transparent);
+    border-radius: 4px;
+}
+
+.vecthare-score-warning {
+    font-size: 1.1em;
+    cursor: help;
+}
+
+.vecthare-score-good {
+    color: #10b981;
+    font-size: 1.1em;
+    cursor: help;
+}
+
+.vecthare-score-fusion {
+    color: #a78bfa;
+    font-weight: 600;
+    padding: 2px 8px;
+    background: color-mix(in srgb, #a78bfa 15%, transparent);
+    border-radius: 4px;
+    font-size: 0.85em;
+}
+
+/* ============================================================================
+ * HYBRID SCORE IN CHUNK HEADER
+ * ============================================================================ */
+
+.vecthare-debug-chunk-score-hybrid {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.vecthare-debug-chunk-score-hybrid .vecthare-score-main {
+    font-weight: 700;
+    font-size: 0.95em;
+    padding: 2px 8px;
+    border-radius: 4px;
+}
+
+.vecthare-debug-chunk-score-hybrid .vecthare-score-mini {
+    display: flex;
+    gap: 6px;
+    font-size: 0.75em;
+    opacity: 0.9;
+}
+
+.vecthare-debug-chunk-score-hybrid .vecthare-mini-vector {
+    color: #60a5fa;
+    cursor: help;
+}
+
+.vecthare-debug-chunk-score-hybrid .vecthare-mini-text {
+    color: #34d399;
+    cursor: help;
+}
+
+/* ============================================================================
  * MOBILE RESPONSIVE
  * ============================================================================ */
 

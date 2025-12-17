@@ -2987,9 +2987,26 @@ function renderSearchResults(results, query) {
       const text = metadata.text || `[Hash: ${collectionResults.hashes[i]}]`;
       const preview = text.length > 200 ? text.substring(0, 200) + "..." : text;
 
+      // Build score breakdown for hybrid search results
+      const vectorScore = metadata.vectorScore !== undefined ? (metadata.vectorScore * 100).toFixed(0) : null;
+      const textScore = metadata.textScore !== undefined ? (metadata.textScore * 100).toFixed(0) : null;
+      const isHybrid = metadata.hybridSearch || (vectorScore !== null && textScore !== null);
+
+      let scoreDisplay = `<div class="vecthare-search-result-score">${score}%</div>`;
+      if (isHybrid) {
+        scoreDisplay = `
+          <div class="vecthare-search-result-score-hybrid">
+            <div class="vecthare-score-main">${score}%</div>
+            <div class="vecthare-score-breakdown">
+              <span class="vecthare-score-vector" title="Semantic similarity">🔷${vectorScore || '?'}%</span>
+              <span class="vecthare-score-text" title="Keyword match">📝${textScore || '0'}%</span>
+            </div>
+          </div>`;
+      }
+
       html += `
                 <div class="vecthare-search-result" data-collection="${collectionId}" data-hash="${collectionResults.hashes[i]}">
-                    <div class="vecthare-search-result-score">${score}%</div>
+                    ${scoreDisplay}
                     <div class="vecthare-search-result-text">${escapeHtml(preview)}</div>
                 </div>
 

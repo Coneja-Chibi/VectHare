@@ -98,7 +98,11 @@ export async function getSemanticWorldInfoEntries(recentMessages, activeEntries,
                         };
 
                         semanticEntries.push(entry);
-                        console.log(`VectHare: Semantic WI activation: "${entry.key}" (score: ${score.toFixed(3)})`);
+                        // Format key for display - handle arrays of strings or objects
+                        const keyDisplay = Array.isArray(entry.key)
+                            ? entry.key.map(k => typeof k === 'object' ? (k.text || k.keyword || JSON.stringify(k)) : k).join(', ')
+                            : (entry.key || 'unknown');
+                        console.log(`VectHare: Semantic WI activation: "${keyDisplay}" (score: ${score.toFixed(3)})`);
                     }
                 }
             }

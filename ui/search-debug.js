@@ -462,6 +462,25 @@ function renderStageChunks(chunks, stageName, data) {
         // Check if this chunk was excluded in later stages
         const wasExcluded = getExclusionStatus(chunk, stageName, data);
 
+        // Build score display - hybrid vs standard
+        const isHybrid = chunk.hybridSearch || (chunk.vectorScore !== undefined && chunk.textScore !== undefined);
+        let scoreDisplay;
+        if (isHybrid) {
+            const finalPct = ((chunk.score || 0) * 100).toFixed(1);
+            const vectorPct = ((chunk.vectorScore || 0) * 100).toFixed(0);
+            const textPct = ((chunk.textScore || 0) * 100).toFixed(0);
+            scoreDisplay = `
+                <span class="vecthare-debug-chunk-score-hybrid">
+                    <span class="vecthare-score-main ${scoreClass}">${finalPct}%</span>
+                    <span class="vecthare-score-mini">
+                        <span class="vecthare-mini-vector" title="Semantic similarity">🔷${vectorPct}%</span>
+                        <span class="vecthare-mini-text" title="Keyword match">📝${textPct}%</span>
+                    </span>
+                </span>`;
+        } else {
+            scoreDisplay = `<span class="vecthare-debug-chunk-score ${scoreClass}">${chunk.score?.toFixed(3) || 'N/A'}</span>`;
+        }
+
         // Build full metadata for expanded view
         const fullMeta = {
             hash: chunk.hash,
@@ -480,7 +499,7 @@ function renderStageChunks(chunks, stageName, data) {
             <div class="vecthare-debug-chunk vecthare-debug-chunk-expandable ${wasExcluded ? 'vecthare-debug-chunk-excluded' : ''}" data-chunk-idx="${idx}">
                 <div class="vecthare-debug-chunk-header">
                     <span class="vecthare-debug-chunk-rank">#${idx + 1}</span>
-                    <span class="vecthare-debug-chunk-score ${scoreClass}">${chunk.score?.toFixed(3) || 'N/A'}</span>
+                    ${scoreDisplay}
                     ${decayInfo}
                     ${wasExcluded ? `<span class="vecthare-debug-excluded-badge">${wasExcluded}</span>` : ''}
                     <i class="fa-solid fa-chevron-down vecthare-debug-chunk-expand-icon"></i>
@@ -603,8 +622,42 @@ function getExclusionStatus(chunk, currentStage, data) {
 /**
  * Builds a score breakdown showing the math behind the final score
  * Shows: vectorScore × keywordBoost × decayMultiplier = finalScore
+ * For hybrid search: shows vector and text scores separately
  */
 function buildScoreBreakdown(chunk) {
+    // Check if this is a hybrid search result
+    const isHybridSearch = chunk.hybridSearch || (chunk.vectorScore !== undefined && chunk.textScore !== undefined);
+
+    if (isHybridSearch) {
+        // Hybrid search breakdown - show vector and text scores
+        const vectorPct = ((chunk.vectorScore || 0) * 100).toFixed(0);
+        const textPct = ((chunk.textScore || 0) * 100).toFixed(0);
+        const finalPct = ((chunk.score || 0) * 100).toFixed(1);
+        const fusionMethod = chunk.fusionMethod || 'rrf';
+        const hasTextMatch = (chunk.textScore || 0) > 0.01;
+
+        let matchIndicator = '';
+        if (!hasTextMatch) {
+            matchIndicator = '<span class="vecthare-score-warning" title="No keyword match - semantic only">⚠️</span>';
+        } else {
+            matchIndicator = '<span class="vecthare-score-good" title="Both semantic and keyword match">✓</span>';
+        }
+
+        return `<div class="vecthare-debug-score-breakdown vecthare-hybrid-breakdown">
+            <div class="vecthare-hybrid-scores">
+                <span class="vecthare-score-vector-badge" title="Semantic similarity">🔷 Vector: ${vectorPct}%</span>
+                <span class="vecthare-score-text-badge" title="Keyword/BM25 match">📝 Text: ${textPct}%</span>
+                ${matchIndicator}
+            </div>
+            <div class="vecthare-score-math">
+                <span class="vecthare-score-fusion">${fusionMethod.toUpperCase()}</span>
+                <span class="vecthare-score-operator">→</span>
+                <span class="vecthare-score-final">${finalPct}%</span>
+            </div>
+        </div>`;
+    }
+
+    // Standard (non-hybrid) breakdown
     // Get the original vector similarity score (before any boosts)
     const vectorScore = chunk.originalScore ?? chunk.score;
     const keywordBoost = chunk.keywordBoost ?? 1.0;

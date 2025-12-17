@@ -672,7 +672,11 @@ async function queryAndMergeCollections(activeCollections, queryText, settings, 
                     text: text,
                     index: meta.messageId || meta.index || 0,
                     collectionId: collectionId,
-                    decayApplied: false
+                    decayApplied: false,
+                    // Hybrid search scores
+                    vectorScore: meta.vectorScore,
+                    textScore: meta.textScore,
+                    hybridSearch: meta.hybridSearch
                 };
             });
 
@@ -1332,13 +1336,6 @@ function deduplicateChunks(chunks, chat, settings, debugData) {
  * @returns {string} Formatted injection text
  */
 function buildNestedInjectionText(chunks, settings) {
-    console.log(`[VectHare buildNestedInjectionText] Building injection text for ${chunks.length} chunks`);
-    
-    // Log each chunk's text content for debugging
-    chunks.forEach((chunk, idx) => {
-        console.log(`[VectHare buildNestedInjectionText] Chunk ${idx + 1}: text length=${chunk.text?.length || 0}, preview="${(chunk.text || '').substring(0, 100)}..."`);
-    });
-    
     // Group chunks by collection
     const byCollection = new Map();
     for (const chunk of chunks) {
@@ -1410,9 +1407,6 @@ function buildNestedInjectionText(chunks, settings) {
     if (globalXmlTag) {
         fullText = `<${globalXmlTag}>\n${fullText}\n</${globalXmlTag}>`;
     }
-
-    console.log(`[VectHare buildNestedInjectionText] Final text length: ${fullText.length}`);
-    console.log(`[VectHare buildNestedInjectionText] Final text:\n${fullText.substring(0, 500)}${fullText.length > 500 ? '...' : ''}`);
 
     return fullText;
 }
@@ -1488,21 +1482,10 @@ function injectChunksIntoPrompt(chunksToInject, settings, debugData) {
 
         console.log(`[VectHare Injection Control] Single position injection: position="${group.position}", depth=${group.depth}, chunks=${group.chunks.length}, textLength=${insertedText.length}`);
         console.log(`[VectHare Injection Control] Injection text preview: "${insertedText.substring(0, 200)}${insertedText.length > 200 ? '...' : ''}"`);
-        console.log(`[VectHare Injection Control] 🔧 Calling setExtensionPrompt with:`, {
-            tag: EXTENSION_PROMPT_TAG,
-            textLength: insertedText.length,
-            position: group.position,
-            positionType: typeof group.position,
-            depth: group.depth,
-            depthType: typeof group.depth
-        });
 
         setExtensionPrompt(EXTENSION_PROMPT_TAG, insertedText, group.position, group.depth, false);
 
-        // Verify injection immediately after
-        console.log(`[VectHare Injection Control] 🔍 Verifying extension_prompts after setExtensionPrompt...`);
-        console.log(`[VectHare Injection Control] extension_prompts keys:`, Object.keys(extension_prompts));
-        
+        // Verify injection
         const verifiedPrompt = extension_prompts[EXTENSION_PROMPT_TAG];
         const injectionVerified = verifiedPrompt && verifiedPrompt.value === insertedText;
 
@@ -1870,18 +1853,6 @@ export async function rearrangeChat(chat, settings, type) {
 
         setLastSearchDebug(debugData);
         console.log(`VectHare: ✅ Injected ${chunksToInject.length} chunks (${skippedDuplicates.length} skipped - already in context)`);
-
-        // Final state dump for debugging
-        console.log(`[VectHare] 🔍 FINAL extension_prompts state after rearrangeChat:`, {
-            keys: Object.keys(extension_prompts),
-            vecthareTag: EXTENSION_PROMPT_TAG,
-            vectharePrompt: extension_prompts[EXTENSION_PROMPT_TAG] ? {
-                hasValue: !!extension_prompts[EXTENSION_PROMPT_TAG].value,
-                valueLength: extension_prompts[EXTENSION_PROMPT_TAG].value?.length,
-                position: extension_prompts[EXTENSION_PROMPT_TAG].position,
-                depth: extension_prompts[EXTENSION_PROMPT_TAG].depth
-            } : 'NOT FOUND'
-        });
 
     } catch (error) {
         toastr.error(`Generation interceptor aborted: ${error.message}`, 'VectHare');

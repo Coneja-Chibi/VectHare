@@ -797,7 +797,7 @@ export async function queryCollection(collectionId, searchText, topK, settings) 
         text: meta.text || ''
     }));
 
-    let finalResults = scoreResults(resultsForBoost, searchText, topK, settings);
+    let finalResults = scoreResults(resultsForBoost, searchText, topK, settings, overfetchAmount);
 
     // Convert back to expected format
     return {
@@ -817,10 +817,10 @@ export async function queryCollection(collectionId, searchText, topK, settings) 
     };
 }
 
-function scoreResults(resultsForBoost, searchText, topK, settings) {
+function scoreResults(resultsForBoost, searchText, topK, settings, overfetchAmount = null) {
     let finalResults;
 
-     // Determine scoring method from settings
+    // Determine scoring method from settings
     const scoringMethod = settings.keyword_scoring_method || 'keyword'; // 'keyword', 'bm25', or 'hybrid'
     if (scoringMethod === 'bm25') {
         // Use BM25 scoring only
@@ -833,7 +833,9 @@ function scoreResults(resultsForBoost, searchText, topK, settings) {
         finalResults = bm25Results.slice(0, topK);
     } else if (scoringMethod === 'hybrid') {
         // Use both keyword boost and BM25
-        const keywordBoosted = applyKeywordBoosts(resultsForBoost, searchText, overfetchAmount);
+        // Use overfetchAmount if provided, otherwise use the full results length for keyword boost
+        const keywordBoostLimit = overfetchAmount || resultsForBoost.length;
+        const keywordBoosted = applyKeywordBoosts(resultsForBoost, searchText, keywordBoostLimit);
         const hybridResults = applyBM25Scoring(keywordBoosted, searchText, {
             k1: settings.bm25_k1 || 1.5,
             b: settings.bm25_b || 0.75,
@@ -914,7 +916,7 @@ export async function queryMultipleCollections(collectionIds, searchText, topK, 
             text: meta.text || ''
         }));
 
-        let finalResults = scoreResults(resultsForBoost, searchText, topK, settings);
+        let finalResults = scoreResults(resultsForBoost, searchText, topK, settings, overfetchAmount);
 
         // Convert back to expected format
         processedResults[collectionId] = {

@@ -405,14 +405,16 @@ function createPipelineStage(label, count, fromCount, icon, colorClass, disabled
  */
 function createKeywordBoostStage(data) {
     const chunks = data.stages.initial || [];
-    const boostedCount = chunks.filter(c => c.keywordBoosted || (c.keywordBoost && c.keywordBoost > 1)).length;
-    const totalKeywordsMatched = chunks.reduce((sum, c) => {
-        return sum + (c.matchedKeywords?.length || c.matchedKeywordsWithWeights?.length || 0);
+    const boostedCount = chunks.filter(c => c.keywordMatched || c.keywordBoosted || (c.keywordBoost && c.keywordBoost > 1)).length;
+    
+    // Count total matched query keywords across all chunks
+    const totalMatchedQueryKeywords = chunks.reduce((sum, c) => {
+        return sum + (c.matchedQueryKeywords?.length || 0);
     }, 0);
 
-    // Show boost count as the badge if any were boosted
-    const badge = boostedCount > 0
-        ? `<div class="vecthare-debug-stage-boost">+${boostedCount}</div>`
+    // Show total matched keywords as the badge
+    const badge = totalMatchedQueryKeywords > 0
+        ? `<div class="vecthare-debug-stage-boost">🔑${totalMatchedQueryKeywords}</div>`
         : '';
 
     return `
@@ -453,6 +455,13 @@ function renderStageChunks(chunks, stageName, data) {
         const decayInfo = chunk.decayApplied
             ? `<span class="vecthare-debug-decay-badge" title="Original: ${chunk.originalScore?.toFixed(3)}">
                    Decay: ${((1 - chunk.decayMultiplier) * 100).toFixed(0)}%↓
+               </span>`
+            : '';
+
+        // Show matched query keywords badge
+        const keywordMatchInfo = chunk.matchedQueryKeywords && chunk.matchedQueryKeywords.length > 0
+            ? `<span class="vecthare-debug-keyword-match-badge" title="Matched query keywords: ${chunk.matchedQueryKeywords.join(', ')}">
+                   🔑 ${chunk.matchedQueryKeywords.length} keyword${chunk.matchedQueryKeywords.length > 1 ? 's' : ''}
                </span>`
             : '';
 
@@ -500,6 +509,7 @@ function renderStageChunks(chunks, stageName, data) {
                 <div class="vecthare-debug-chunk-header">
                     <span class="vecthare-debug-chunk-rank">#${idx + 1}</span>
                     ${scoreDisplay}
+                    ${keywordMatchInfo}
                     ${decayInfo}
                     ${wasExcluded ? `<span class="vecthare-debug-excluded-badge">${wasExcluded}</span>` : ''}
                     <i class="fa-solid fa-chevron-down vecthare-debug-chunk-expand-icon"></i>
@@ -538,6 +548,11 @@ function renderStageChunks(chunks, stageName, data) {
                             <div class="vecthare-debug-meta-item">
                                 <span class="meta-label">Keywords</span>
                                 <span class="meta-value">${chunk.metadata.keywords.map(k => typeof k === 'object' ? `${k.text}(${k.weight}x)` : k).join(', ')}</span>
+                            </div>` : ''}
+                            ${chunk.matchedQueryKeywords?.length ? `
+                            <div class="vecthare-debug-meta-item">
+                                <span class="meta-label">Matched Query Keywords</span>
+                                <span class="meta-value vecthare-matched-keywords">${chunk.matchedQueryKeywords.join(', ')}</span>
                             </div>` : ''}
                         </div>
                     </div>

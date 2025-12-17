@@ -408,6 +408,16 @@
     color: #f59e0b;
 }
 
+.vecthare-debug-keyword-match-badge {
+    font-size: 0.75em;
+    padding: 2px 6px;
+    background: color-mix(in srgb, #10b981 15%, transparent);
+    border: 1px solid #10b981;
+    border-radius: 4px;
+    color: #10b981;
+    font-weight: 600;
+}
+
 .vecthare-debug-excluded-badge {
     font-size: 0.75em;
     padding: 2px 6px;
@@ -1259,6 +1269,13 @@
     max-width: 300px;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+.vecthare-debug-meta-item .meta-value.vecthare-matched-keywords {
+    color: #10b981;
+    font-weight: 600;
+    max-width: none;
+    text-overflow: unset;
 }
 
 .vecthare-debug-click-hint {

@@ -13,7 +13,7 @@ import { getCurrentChatId, is_send_press, setExtensionPrompt, substituteParams, 
 import { getContext } from '../../../../extensions.js';
 import { getStringHash as calculateHash, waitUntilCondition, onlyUnique } from '../../../../utils.js';
 import { isUnitStrategy } from './chunking.js';
-import { extractChatKeywords } from './keyword-boost.js';
+import { extractChatKeywords, extractBM25Keywords } from './keyword-boost.js';
 import { cleanText } from './text-cleaning.js';
 import {
     getSavedHashes,
@@ -137,10 +137,17 @@ function prepareItemsForInsertion(items) {
  * @param {object[]} messages Messages to group
  * @param {string} strategy Chunking strategy: 'per_message', 'conversation_turns', 'message_batch'
  * @param {number} batchSize Number of messages per batch (for message_batch strategy)
+ * @param {string} keywordLevel Keyword extraction level: 'off', 'minimal', 'balanced', 'aggressive'
  * @returns {object[]} Grouped message items ready for chunking
  */
-function groupMessagesByStrategy(messages, strategy, batchSize = 4) {
+function groupMessagesByStrategy(messages, strategy, batchSize = 4, keywordLevel = 'balanced') {
     if (!messages.length) return [];
+
+    // Helper to extract keywords based on level
+    const getKeywords = (text) => {
+        if (keywordLevel === 'off') return [];
+        return extractBM25Keywords(text, { level: keywordLevel });
+    };
 
     switch (strategy) {
         case 'conversation_turns': {
@@ -161,7 +168,7 @@ function groupMessagesByStrategy(messages, strategy, batchSize = 4) {
                     text: combinedText,
                     hash: getStringHash(combinedText),
                     index: messages[i].index,
-                    keywords: extractChatKeywords(combinedText),
+                    keywords: getKeywords(combinedText),
                     metadata: {
                         strategy: 'conversation_turns',
                         messageIds: pair.map(m => m.index),
@@ -189,7 +196,7 @@ function groupMessagesByStrategy(messages, strategy, batchSize = 4) {
                     text: combinedText,
                     hash: getStringHash(combinedText),
                     index: batch[0].index,
-                    keywords: extractChatKeywords(combinedText),
+                    keywords: getKeywords(combinedText),
                     metadata: {
                         strategy: 'message_batch',
                         batchSize: batch.length,
@@ -211,7 +218,7 @@ function groupMessagesByStrategy(messages, strategy, batchSize = 4) {
                 hash: m.hash,
                 index: m.index,
                 is_user: m.is_user,
-                keywords: extractChatKeywords(m.text),
+                keywords: getKeywords(m.text),
                 metadata: {
                     strategy: 'per_message',
                     messageId: m.index,
@@ -439,7 +446,8 @@ export async function synchronizeChat(settings, batchSize = 5) {
         }
 
         // Group messages according to strategy
-        const groupedItems = groupMessagesByStrategy(allMessages, strategy, strategyBatchSize);
+        const keywordLevel = settings.keyword_extraction_level || 'balanced';
+        const groupedItems = groupMessagesByStrategy(allMessages, strategy, strategyBatchSize, keywordLevel);
 
         // Filter out already vectorized items (by their grouped hash)
         const queue = new Queue();

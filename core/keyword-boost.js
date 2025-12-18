@@ -561,6 +561,220 @@ export function extractBM25Keywords(text, options = {}) {
 }
 
 /**
+ * ============================================================================
+ * ENHANCED KEYWORD EXTRACTION (Named Entity Detection + TF-IDF + Position)
+ * ============================================================================
+ *
+ * Multi-signal approach that combines:
+ * 1. Named Entity Detection (proper nouns, acronyms)
+ * 2. TF-IDF scoring for distinctive terms
+ * 3. Position weighting (title/header boost)
+ *
+ * This is more sophisticated than pure TF-IDF and catches important
+ * named entities that might have low frequency.
+ */
+
+/** Position weight multipliers */
+const POSITION_WEIGHTS = {
+    title: 2.5,    // First line (assumed title)
+    header: 1.8,   // First 20% of text
+    middle: 1.2,   // Middle 60%
+    end: 0.9,      // Last 20%
+};
+
+/** Entity boost multiplier */
+const ENTITY_BOOST = 1.3;
+
+/**
+ * Extract keywords using multi-signal approach
+ * Combines Named Entity Detection + TF-IDF + Position Weighting
+ *
+ * @param {string} text - Text to extract keywords from
+ * @param {object} options - Extraction options
+ * @param {string} options.level - Extraction level (default: 'balanced')
+ * @param {number} options.baseWeight - Base weight for keywords (default: 1.5)
+ * @param {boolean} options.detectEntities - Detect named entities (default: true)
+ * @param {boolean} options.positionWeighting - Apply position weighting (default: true)
+ * @returns {Array<{text: string, weight: number, type: string}>} Weighted keywords
+ */
+export function extractSmartKeywords(text, options = {}) {
+    if (!text || typeof text !== 'string' || text.trim().length === 0) return [];
+
+    const level = options.level || DEFAULT_EXTRACTION_LEVEL;
+    const config = EXTRACTION_LEVELS[level];
+    if (!config || !config.enabled) return [];
+
+    const baseWeight = options.baseWeight || DEFAULT_BASE_WEIGHT;
+    const maxKeywords = options.maxKeywords || config.maxKeywords || 8;
+    const detectEntities = options.detectEntities !== false;
+    const positionWeighting = options.positionWeighting !== false;
+
+    // Apply header size limit
+    let scanText = text;
+    if (config.headerSize && text.length > config.headerSize) {
+        scanText = text.substring(0, config.headerSize);
+        const lastSpace = scanText.lastIndexOf(' ');
+        if (lastSpace > config.headerSize * 0.8) {
+            scanText = scanText.substring(0, lastSpace);
+        }
+    }
+
+    const keywordCandidates = new Map(); // word -> { score, type, position }
+
+    // ---------------------------
+    // 1. Named Entity Detection
+    // ---------------------------
+    if (detectEntities) {
+        // Proper nouns: Capitalized words not at sentence start
+        // Pattern: Capitalized word following lowercase or punctuation
+        const properNounRegex = /(?<=[a-z.,!?]\s+|\*|"|')([A-Z][a-z]{2,}(?:\s+[A-Z][a-z]+){0,2})\b/g;
+        let match;
+        while ((match = properNounRegex.exec(text)) !== null) {
+            const entity = match[1].toLowerCase();
+            if (!KEYWORD_STOP_WORDS.has(entity) && entity.length >= 3) {
+                const position = getPositionWeight(match.index, text.length, positionWeighting);
+                const existing = keywordCandidates.get(entity);
+                if (!existing || existing.score < ENTITY_BOOST * position) {
+                    keywordCandidates.set(entity, {
+                        score: ENTITY_BOOST * position,
+                        type: 'entity',
+                        position: position,
+                        isEntity: true
+                    });
+                }
+            }
+        }
+
+        // Acronyms: 2-5 uppercase letters (FBI, NASA, UK)
+        const acronymRegex = /\b([A-Z]{2,5})\b/g;
+        while ((match = acronymRegex.exec(text)) !== null) {
+            const acronym = match[1].toLowerCase();
+            // Skip common false positives
+            if (['the', 'and', 'for', 'are', 'but', 'not', 'you', 'all'].includes(acronym)) continue;
+            const position = getPositionWeight(match.index, text.length, positionWeighting);
+            const existing = keywordCandidates.get(acronym);
+            if (!existing || existing.score < ENTITY_BOOST * position * 1.2) {
+                keywordCandidates.set(acronym, {
+                    score: ENTITY_BOOST * position * 1.2,
+                    type: 'acronym',
+                    position: position,
+                    isEntity: true
+                });
+            }
+        }
+    }
+
+    // ---------------------------
+    // 2. TF-IDF Scoring
+    // ---------------------------
+    const sentences = scanText.split(/[.!?\n]+/).map(s => s.trim()).filter(s => s.length > 10);
+    if (sentences.length === 0) sentences.push(scanText);
+
+    const tokenizeSentence = (s) => {
+        return s.toLowerCase()
+            .replace(/[^\w\s'-]/g, ' ')
+            .split(/\s+/)
+            .filter(t => t.length >= 3 && !KEYWORD_STOP_WORDS.has(t));
+    };
+
+    const sentenceTokens = sentences.map(tokenizeSentence);
+
+    // Document frequency
+    const docFreq = new Map();
+    for (const tokens of sentenceTokens) {
+        for (const token of new Set(tokens)) {
+            docFreq.set(token, (docFreq.get(token) || 0) + 1);
+        }
+    }
+
+    // Term frequency
+    const termFreq = new Map();
+    for (const token of sentenceTokens.flat()) {
+        termFreq.set(token, (termFreq.get(token) || 0) + 1);
+    }
+
+    // Calculate TF-IDF for each term
+    const numSentences = sentences.length;
+    for (const [word, tf] of termFreq.entries()) {
+        if (tf < (config.minFrequency || 1)) continue;
+
+        const df = docFreq.get(word) || 1;
+        const idf = Math.log((numSentences + 1) / (df + 1)) + 1;
+        const tfidf = tf * idf;
+
+        // Find word position in text for position weighting
+        const wordIndex = text.toLowerCase().indexOf(word);
+        const posWeight = getPositionWeight(wordIndex, text.length, positionWeighting);
+
+        // Check if already an entity (boost TF-IDF score for entities)
+        const existing = keywordCandidates.get(word);
+        const entityBonus = existing?.isEntity ? ENTITY_BOOST : 1.0;
+
+        const finalScore = tfidf * posWeight * entityBonus;
+
+        if (!existing || existing.score < finalScore) {
+            keywordCandidates.set(word, {
+                score: finalScore,
+                type: existing?.isEntity ? 'entity+tfidf' : 'tfidf',
+                position: posWeight,
+                tfidf: tfidf,
+                isEntity: existing?.isEntity || false
+            });
+        }
+    }
+
+    // ---------------------------
+    // 3. Sort and Select Top Keywords
+    // ---------------------------
+    const sortedKeywords = Array.from(keywordCandidates.entries())
+        .sort((a, b) => b[1].score - a[1].score)
+        .slice(0, maxKeywords);
+
+    if (sortedKeywords.length === 0) return [];
+
+    const maxScore = sortedKeywords[0][1].score;
+    const keywords = sortedKeywords.map(([word, data]) => ({
+        text: word,
+        weight: baseWeight + (data.score / maxScore) * 0.5,
+        type: data.type,
+        isEntity: data.isEntity,
+        positionWeight: data.position,
+        tfidf: data.tfidf
+    }));
+
+    if (keywords.length > 0) {
+        const entityCount = keywords.filter(k => k.isEntity).length;
+        console.debug(`[VectHare Smart Keywords] Level=${level}, ${keywords.length} keywords (${entityCount} entities) → [${keywords.map(k => `${k.text}(${k.type})`).join(', ')}]`);
+    }
+
+    return keywords;
+}
+
+/**
+ * Get position weight based on where the word appears in text
+ */
+function getPositionWeight(index, textLength, enabled = true) {
+    if (!enabled || index < 0 || textLength === 0) return 1.0;
+
+    const position = index / textLength;
+
+    // First line (approx first 100 chars or 5%) - likely title
+    if (index < 100 || position < 0.05) {
+        return POSITION_WEIGHTS.title;
+    }
+    // First 20% - header area
+    if (position < 0.2) {
+        return POSITION_WEIGHTS.header;
+    }
+    // Last 20%
+    if (position > 0.8) {
+        return POSITION_WEIGHTS.end;
+    }
+    // Middle 60%
+    return POSITION_WEIGHTS.middle;
+}
+
+/**
  * Normalize a keyword to { text, weight } format
  * Handles both string and object formats
  * @param {string|object} kw - Keyword (string or { text, weight })
@@ -592,24 +806,54 @@ function queryHasKeyword(query, keyword) {
 }
 
 /**
- * Apply keyword boost to search results
- * Uses ADDITIVE math: boost = 1 + sum(weight - 1) for each matched keyword
+ * Maximum per-keyword contribution cap (prevents single high-weight keyword from dominating)
+ */
+const MAX_KEYWORD_CONTRIBUTION = 0.5;
+
+/**
+ * Scaling factors based on match count (diminishing returns)
+ * This prevents spam where many low-relevance keywords could inflate scores
+ */
+const MATCH_SCALING_FACTORS = {
+    1: 0.30,   // 1 match: 30% of raw boost
+    2: 0.60,   // 2 matches: 60% of raw boost
+    3: 1.00,   // 3+ matches: full boost
+};
+
+/**
+ * Apply keyword boost with DIMINISHING RETURNS
  *
- * Examples:
- *   - Match "magic" (1.5x): boost = 1 + 0.5 = 1.5x
- *   - Match "magic" (1.5x) + "divine" (2.0x): boost = 1 + 0.5 + 1.0 = 2.5x
- *   - Match 7 keywords at 1.5x each: boost = 1 + (0.5 × 7) = 4.5x
+ * Enhanced boost calculation that prevents exploitation:
+ * 1. Per-keyword contribution capped at 0.5 (prevents single high-weight keyword dominance)
+ * 2. Scaling factor based on match count (1 match = 30%, 2 = 60%, 3+ = 100%)
+ * 3. More keywords required for full boost effect
+ *
+ * Examples (with diminishing returns):
+ *   - 1 match "magic" (1.5x): contribution=0.5, rawBoost=1.5, scale=30% → finalBoost=1.15x
+ *   - 2 matches (1.5x each): contribution=0.5+0.5=1.0, rawBoost=2.0, scale=60% → finalBoost=1.6x
+ *   - 3+ matches: full boost applied
+ *
+ * Spam Protection:
+ *   - 1 match "magic" (3.0x): contribution=min(2.0,0.5)=0.5, rawBoost=1.5, scale=30% → 1.15x (not 3.0x!)
  *
  * @param {Array} results - Search results [{text, score, keywords, ...}]
  * @param {string} query - The search query
+ * @param {object} options - Boost options
+ * @param {boolean} options.diminishingReturns - Use diminishing returns (default: true)
+ * @param {boolean} options.perKeywordCap - Cap per-keyword contribution (default: true)
  * @returns {Array} Results with boosted scores, sorted by score desc
  */
-export function applyKeywordBoost(results, query) {
+export function applyKeywordBoost(results, query, options = {}) {
     if (!results || !Array.isArray(results) || !query) return results;
+
+    const {
+        diminishingReturns = true,
+        perKeywordCap = true
+    } = options;
 
     const queryLower = query.toLowerCase();
 
-    console.log(`[VectHare Keyword Boost] Starting keyword boost for query: "${query}"`);
+    console.log(`[VectHare Keyword Boost] Starting keyword boost for query: "${query}" (diminishing=${diminishingReturns}, cap=${perKeywordCap})`);
 
     const boosted = results.map(result => {
         const rawKeywords = result.keywords || result.metadata?.keywords || [];
@@ -622,26 +866,49 @@ export function applyKeywordBoost(results, query) {
 
             if (queryHasKeyword(queryLower, normalized.text)) {
                 matchedKeywords.push(normalized);
-                // Additive: add the boost portion (weight - 1.0)
-                boostSum += (normalized.weight - 1.0);
+
+                // Calculate contribution with optional per-keyword cap
+                const rawContribution = normalized.weight - 1.0;
+                const contribution = perKeywordCap
+                    ? Math.min(rawContribution, MAX_KEYWORD_CONTRIBUTION)
+                    : rawContribution;
+
+                boostSum += contribution;
             }
         }
 
-        // Final boost: 1.0 + sum of all matched boosts
-        const boost = 1.0 + boostSum;
+        // Calculate raw boost
+        const rawBoost = 1.0 + boostSum;
+
+        // Apply diminishing returns scaling based on match count
+        let finalBoost;
+        if (diminishingReturns && matchedKeywords.length > 0) {
+            const matchCount = Math.min(matchedKeywords.length, 3);
+            const scalingFactor = MATCH_SCALING_FACTORS[matchCount];
+
+            // Scale only the boost portion, not the base 1.0
+            finalBoost = 1.0 + (boostSum * scalingFactor);
+        } else {
+            finalBoost = rawBoost;
+        }
 
         if (matchedKeywords.length > 0) {
-            console.log(`[VectHare Keyword Boost] Result matched ${matchedKeywords.length} keyword(s): [${matchedKeywords.map(k => `${k.text}(${k.weight.toFixed(2)}x)`).join(', ')}] → boost: ${boost.toFixed(2)}x, score: ${result.score.toFixed(4)} → ${(result.score * boost).toFixed(4)}`);
+            const scaleInfo = diminishingReturns
+                ? ` (raw=${rawBoost.toFixed(2)}x, scale=${(MATCH_SCALING_FACTORS[Math.min(matchedKeywords.length, 3)] * 100).toFixed(0)}%)`
+                : '';
+            console.log(`[VectHare Keyword Boost] Result matched ${matchedKeywords.length} keyword(s): [${matchedKeywords.map(k => `${k.text}(${k.weight.toFixed(2)}x)`).join(', ')}] → boost: ${finalBoost.toFixed(2)}x${scaleInfo}, score: ${result.score.toFixed(4)} → ${(result.score * finalBoost).toFixed(4)}`);
         }
 
         return {
             ...result,
-            score: result.score * boost,
+            score: Math.min(1.0, result.score * finalBoost), // Cap at 1.0
             originalScore: result.score,
-            keywordBoost: boost,
+            keywordBoost: finalBoost,
+            rawBoost: rawBoost,
             matchedKeywords: matchedKeywords.map(k => k.text),
             matchedKeywordsWithWeights: matchedKeywords,
             keywordBoosted: matchedKeywords.length > 0,
+            diminishingReturns: diminishingReturns,
         };
     });
 
@@ -649,7 +916,7 @@ export function applyKeywordBoost(results, query) {
     boosted.sort((a, b) => b.score - a.score);
 
     const boostedCount = boosted.filter(r => r.keywordBoosted).length;
-    console.log(`[VectHare Keyword Boost] Applied keyword boosts to ${boostedCount}/${boosted.length} results`);
+    console.log(`[VectHare Keyword Boost] Applied keyword boosts to ${boostedCount}/${boosted.length} results (diminishing=${diminishingReturns})`);
 
     return boosted;
 }

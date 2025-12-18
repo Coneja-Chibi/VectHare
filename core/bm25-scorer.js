@@ -1,37 +1,240 @@
 /**
  * ============================================================================
- * BM25 KEYWORD SCORING
+ * BM25+ KEYWORD SCORING (ENHANCED)
  * ============================================================================
- * Implementation of BM25 (Best Match 25) algorithm for keyword-based scoring
- * Based on Langchain's BM25 retriever approach
+ * Enhanced implementation of BM25+ algorithm with:
+ * - Porter Stemmer with LRU caching
+ * - Comprehensive stop word filtering (190+ words)
+ * - Sublinear term frequency: log(1 + tf)
+ * - Coverage bonus: +10% when all query terms match
+ * - Field boosting: Title (3x), Tags (2x), Content (1x)
+ * - BM25+ IDF formula with delta smoothing
  *
- * BM25 is a probabilistic ranking function that scores documents based on:
- * - Term frequency (TF): how often a term appears in a document
- * - Inverse document frequency (IDF): how rare/common a term is across all documents
- * - Document length normalization: adjusts for varying document lengths
+ * Based on research showing BM25+ outperforms standard BM25 for long documents.
  *
- * @version 1.0.0
+ * @version 2.0.0
  * ============================================================================
  */
 
 /**
- * Default BM25 parameters
+ * Default BM25+ parameters
  * k1: Term frequency saturation parameter (1.2-2.0 typical)
  * b: Length normalization parameter (0.75 typical)
+ * delta: BM25+ lower bound for term frequency (0.5 typical)
  */
 const DEFAULT_K1 = 1.5;
 const DEFAULT_B = 0.75;
+const DEFAULT_DELTA = 0.5;
 
 /**
- * Simple tokenizer - splits text into words
- * @param {string} text - Text to tokenize
- * @returns {string[]} Array of tokens (lowercase words)
+ * Comprehensive English stopwords list (190+ words)
  */
-function tokenize(text) {
+const STOP_WORDS = new Set([
+    // Articles & determiners
+    'the', 'a', 'an', 'this', 'that', 'these', 'those', 'some', 'any', 'each',
+    'every', 'both', 'either', 'neither', 'such', 'what', 'which', 'whose',
+    // Pronouns
+    'i', 'me', 'my', 'mine', 'myself', 'you', 'your', 'yours', 'yourself',
+    'he', 'him', 'his', 'himself', 'she', 'her', 'hers', 'herself',
+    'it', 'its', 'itself', 'we', 'us', 'our', 'ours', 'ourselves',
+    'they', 'them', 'their', 'theirs', 'themselves',
+    'who', 'whom', 'whoever', 'someone', 'anyone', 'everyone', 'nobody',
+    'something', 'anything', 'everything', 'nothing',
+    // Conjunctions
+    'and', 'or', 'but', 'nor', 'so', 'yet', 'for', 'because', 'although',
+    'while', 'whereas', 'unless', 'until', 'since', 'when', 'whenever',
+    'where', 'wherever', 'whether', 'if', 'then', 'than', 'as',
+    // Prepositions
+    'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from', 'into', 'onto',
+    'upon', 'out', 'off', 'over', 'under', 'above', 'below', 'between', 'among',
+    'through', 'during', 'before', 'after', 'behind', 'beside', 'beyond',
+    'within', 'without', 'about', 'around', 'against', 'along', 'across',
+    // Common verbs
+    'be', 'am', 'is', 'are', 'was', 'were', 'been', 'being',
+    'have', 'has', 'had', 'having', 'do', 'does', 'did', 'doing', 'done',
+    'will', 'would', 'shall', 'should', 'may', 'might', 'must', 'can', 'could',
+    'get', 'got', 'go', 'went', 'gone', 'come', 'came', 'take', 'took', 'taken',
+    'make', 'made', 'say', 'said', 'know', 'knew', 'think', 'thought',
+    'see', 'saw', 'seen', 'want', 'use', 'find', 'found', 'give', 'gave',
+    // Adverbs
+    'very', 'really', 'quite', 'just', 'only', 'even', 'also', 'still', 'already',
+    'always', 'never', 'ever', 'often', 'sometimes', 'usually', 'now', 'then',
+    'here', 'there', 'today', 'soon', 'again', 'much', 'more', 'most', 'less',
+    'well', 'however', 'therefore', 'thus', 'too', 'enough',
+    // Common adjectives
+    'good', 'great', 'best', 'better', 'bad', 'new', 'old', 'big', 'small',
+    'large', 'little', 'long', 'short', 'high', 'low', 'same', 'different',
+    'other', 'another', 'next', 'last', 'first', 'many', 'few', 'own',
+    // Other common words
+    'thing', 'things', 'way', 'ways', 'place', 'part', 'case', 'point', 'fact',
+    'like', 'back', 'time', 'year', 'day', 'one', 'two', 'three',
+]);
+
+/**
+ * Porter Stemmer cache (LRU-style with max size)
+ */
+const stemmerCache = new Map();
+const STEMMER_CACHE_MAX = 10000;
+
+/**
+ * Porter Stemmer Algorithm
+ * Reduces words to their root form for better matching
+ * Examples: "running" → "run", "adventurers" → "adventur"
+ *
+ * @param {string} word - Word to stem
+ * @returns {string} Stemmed word
+ */
+function porterStemmer(word) {
+    if (!word || word.length <= 2) return word;
+
+    // Check cache first
+    if (stemmerCache.has(word)) {
+        return stemmerCache.get(word);
+    }
+
+    let stem = word.toLowerCase();
+
+    // Step 1a: Remove plurals
+    if (stem.endsWith('sses')) {
+        stem = stem.slice(0, -2);
+    } else if (stem.endsWith('ies')) {
+        stem = stem.slice(0, -2);
+    } else if (stem.endsWith('ss')) {
+        // Keep as is
+    } else if (stem.endsWith('s')) {
+        stem = stem.slice(0, -1);
+    }
+
+    // Step 1b: Handle -ed and -ing
+    const hasVowel = (s) => /[aeiou]/.test(s);
+
+    if (stem.endsWith('eed')) {
+        if (stem.length > 4) stem = stem.slice(0, -1);
+    } else if (stem.endsWith('ed')) {
+        const base = stem.slice(0, -2);
+        if (hasVowel(base)) {
+            stem = base;
+            // Handle double consonants
+            if (stem.endsWith('at') || stem.endsWith('bl') || stem.endsWith('iz')) {
+                stem += 'e';
+            } else if (/([^aeiouslz])\1$/.test(stem)) {
+                stem = stem.slice(0, -1);
+            }
+        }
+    } else if (stem.endsWith('ing')) {
+        const base = stem.slice(0, -3);
+        if (hasVowel(base)) {
+            stem = base;
+            if (stem.endsWith('at') || stem.endsWith('bl') || stem.endsWith('iz')) {
+                stem += 'e';
+            } else if (/([^aeiouslz])\1$/.test(stem)) {
+                stem = stem.slice(0, -1);
+            }
+        }
+    }
+
+    // Step 2: Common suffix replacements
+    const step2Mappings = [
+        ['ational', 'ate'], ['tional', 'tion'], ['enci', 'ence'], ['anci', 'ance'],
+        ['izer', 'ize'], ['abli', 'able'], ['alli', 'al'], ['entli', 'ent'],
+        ['eli', 'e'], ['ousli', 'ous'], ['ization', 'ize'], ['ation', 'ate'],
+        ['ator', 'ate'], ['alism', 'al'], ['iveness', 'ive'], ['fulness', 'ful'],
+        ['ousness', 'ous'], ['aliti', 'al'], ['iviti', 'ive'], ['biliti', 'ble'],
+    ];
+
+    for (const [suffix, replacement] of step2Mappings) {
+        if (stem.endsWith(suffix) && stem.length > suffix.length + 2) {
+            stem = stem.slice(0, -suffix.length) + replacement;
+            break;
+        }
+    }
+
+    // Step 3: More suffix handling
+    const step3Mappings = [
+        ['icate', 'ic'], ['ative', ''], ['alize', 'al'],
+        ['iciti', 'ic'], ['ical', 'ic'], ['ful', ''], ['ness', ''],
+    ];
+
+    for (const [suffix, replacement] of step3Mappings) {
+        if (stem.endsWith(suffix) && stem.length > suffix.length + 2) {
+            stem = stem.slice(0, -suffix.length) + replacement;
+            break;
+        }
+    }
+
+    // Step 4: Remove final 'e' in certain cases
+    if (stem.endsWith('e') && stem.length > 3) {
+        const base = stem.slice(0, -1);
+        // Keep 'e' if removing would leave CVC pattern with final consonant not w,x,y
+        if (!(/[^aeiou][aeiou][^aeiouxwy]$/.test(base))) {
+            stem = base;
+        }
+    }
+
+    // Cache the result (with LRU eviction)
+    if (stemmerCache.size >= STEMMER_CACHE_MAX) {
+        const firstKey = stemmerCache.keys().next().value;
+        stemmerCache.delete(firstKey);
+    }
+    stemmerCache.set(word, stem);
+
+    return stem;
+}
+
+/**
+ * Enhanced tokenizer with stemming and stop word removal
+ * @param {string} text - Text to tokenize
+ * @param {object} options - Tokenization options
+ * @param {boolean} options.stem - Apply Porter stemming (default: true)
+ * @param {boolean} options.removeStopWords - Remove stop words (default: true)
+ * @param {number} options.minLength - Minimum token length (default: 2)
+ * @returns {string[]} Array of processed tokens
+ */
+function tokenize(text, options = {}) {
+    if (!text || typeof text !== 'string') return [];
+
+    const {
+        stem = true,
+        removeStopWords = true,
+        minLength = 2
+    } = options;
+
+    // Normalize and split
+    let tokens = text
+        .toLowerCase()
+        .replace(/[^\w\s]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .split(/\s+/)
+        .filter(token => token.length >= minLength);
+
+    // Remove stop words
+    if (removeStopWords) {
+        tokens = tokens.filter(token => !STOP_WORDS.has(token));
+    }
+
+    // Apply Porter stemming
+    if (stem) {
+        tokens = tokens.map(token => {
+            // Don't stem very short words or numbers
+            if (token.length <= 3 || /^\d+$/.test(token)) return token;
+            return porterStemmer(token);
+        });
+    }
+
+    // Deduplicate (preserve order)
+    return [...new Set(tokens)];
+}
+
+/**
+ * Simple tokenizer (no stemming, no stop word removal)
+ * For backwards compatibility
+ */
+function tokenizeSimple(text) {
     if (!text || typeof text !== 'string') return [];
     return text
         .toLowerCase()
-        .replace(/[^\w\s]/g, ' ') // Replace punctuation with spaces
+        .replace(/[^\w\s]/g, ' ')
         .split(/\s+/)
         .filter(token => token.length > 0);
 }
@@ -51,14 +254,15 @@ function calculateTermFrequency(tokens) {
 
 /**
  * Calculate inverse document frequency (IDF) for all terms
- * IDF = log((N - df + 0.5) / (df + 0.5) + 1)
- * where N = total documents, df = documents containing term
+ * BM25+ IDF formula: max(0, log((N - df + 0.5) / (df + 0.5))) + delta
+ * where N = total documents, df = documents containing term, delta = 0.5
  *
  * @param {Array<Map<string, number>>} documentTermFreqs - TF maps for all documents
  * @param {number} totalDocs - Total number of documents
+ * @param {number} delta - BM25+ delta smoothing (default: 0.5)
  * @returns {Map<string, number>} Map of term -> IDF score
  */
-function calculateIDF(documentTermFreqs, totalDocs) {
+function calculateIDF(documentTermFreqs, totalDocs, delta = DEFAULT_DELTA) {
     const documentFrequency = new Map();
 
     // Count how many documents contain each term
@@ -69,11 +273,12 @@ function calculateIDF(documentTermFreqs, totalDocs) {
         }
     }
 
-    // Calculate IDF for each term
+    // Calculate IDF for each term using BM25+ formula
     const idf = new Map();
     for (const [term, df] of documentFrequency.entries()) {
-        // BM25 IDF formula with smoothing
-        const idfScore = Math.log((totalDocs - df + 0.5) / (df + 0.5) + 1);
+        // BM25+ IDF: max(0, log(...)) + delta to prevent negative values
+        const rawIdf = Math.log((totalDocs - df + 0.5) / (df + 0.5));
+        const idfScore = Math.max(0, rawIdf) + delta;
         idf.set(term, idfScore);
     }
 
@@ -81,18 +286,32 @@ function calculateIDF(documentTermFreqs, totalDocs) {
 }
 
 /**
- * BM25 Scorer class
+ * BM25+ Scorer class (Enhanced)
  * Maintains corpus statistics for efficient scoring
+ *
+ * Enhancements over standard BM25:
+ * - Sublinear TF: log(1 + tf) prevents frequent terms from dominating
+ * - Coverage bonus: +10% when all query terms match
+ * - Field boosting: Title (3x), Tags (2x), Content (1x)
+ * - BM25+ IDF with delta smoothing
  */
 export class BM25Scorer {
     /**
-     * @param {object} options - BM25 parameters
+     * @param {object} options - BM25+ parameters
      * @param {number} options.k1 - Term frequency saturation (default: 1.5)
      * @param {number} options.b - Length normalization (default: 0.75)
+     * @param {number} options.delta - BM25+ IDF smoothing (default: 0.5)
+     * @param {boolean} options.sublinearTf - Use sublinear TF: log(1+tf) (default: true)
+     * @param {boolean} options.coverageBonus - Apply coverage bonus (default: true)
+     * @param {boolean} options.fieldBoosting - Enable field boosting (default: false)
      */
     constructor(options = {}) {
         this.k1 = options.k1 ?? DEFAULT_K1;
         this.b = options.b ?? DEFAULT_B;
+        this.delta = options.delta ?? DEFAULT_DELTA;
+        this.sublinearTf = options.sublinearTf ?? true;
+        this.coverageBonus = options.coverageBonus ?? true;
+        this.fieldBoosting = options.fieldBoosting ?? false;
 
         // Corpus statistics
         this.documents = [];
@@ -105,7 +324,7 @@ export class BM25Scorer {
 
     /**
      * Index a corpus of documents
-     * @param {Array<{text: string, id?: any}>} documents - Documents to index
+     * @param {Array<{text: string, title?: string, tags?: string[], id?: any}>} documents - Documents to index
      */
     indexDocuments(documents) {
         this.documents = documents;
@@ -116,31 +335,55 @@ export class BM25Scorer {
         // Tokenize and calculate TF for each document
         let totalLength = 0;
         for (const doc of documents) {
-            const tokens = tokenize(doc.text);
-            const tf = calculateTermFrequency(tokens);
+            let allTokens = [];
+
+            // Field boosting: duplicate title/tag tokens for higher weight
+            if (this.fieldBoosting) {
+                // Title tokens (3x weight)
+                if (doc.title) {
+                    const titleTokens = tokenize(doc.title);
+                    for (let i = 0; i < 3; i++) {
+                        allTokens.push(...titleTokens);
+                    }
+                }
+                // Tag tokens (2x weight)
+                if (doc.tags && Array.isArray(doc.tags)) {
+                    const tagTokens = doc.tags.flatMap(tag => tokenize(tag));
+                    for (let i = 0; i < 2; i++) {
+                        allTokens.push(...tagTokens);
+                    }
+                }
+            }
+
+            // Content tokens (1x weight)
+            const contentTokens = tokenize(doc.text);
+            allTokens.push(...contentTokens);
+
+            const tf = calculateTermFrequency(allTokens);
 
             this.documentTermFreqs.push(tf);
-            this.documentLengths.push(tokens.length);
-            totalLength += tokens.length;
+            this.documentLengths.push(allTokens.length);
+            totalLength += allTokens.length;
         }
 
         // Calculate average document length
         this.avgDocLength = this.totalDocs > 0 ? totalLength / this.totalDocs : 0;
 
         // Calculate IDF for all terms in corpus
-        this.idf = calculateIDF(this.documentTermFreqs, this.totalDocs);
+        this.idf = calculateIDF(this.documentTermFreqs, this.totalDocs, this.delta);
 
-        console.log(`[BM25] Indexed ${this.totalDocs} documents, avg length: ${this.avgDocLength.toFixed(1)} tokens`);
+        console.log(`[BM25+] Indexed ${this.totalDocs} documents, avg length: ${this.avgDocLength.toFixed(1)} tokens, sublinearTf=${this.sublinearTf}, fieldBoosting=${this.fieldBoosting}`);
     }
 
     /**
      * Score a single document against a query
-     * BM25 formula:
-     * score = Σ(IDF(qi) * (f(qi, D) * (k1 + 1)) / (f(qi, D) + k1 * (1 - b + b * |D| / avgdl)))
+     * BM25+ formula with sublinear TF:
+     * tf_smart = log(1 + raw_tf)
+     * score = Σ(IDF(qi) * (tf_smart(qi, D) * (k1 + 1)) / (tf_smart(qi, D) + k1 * lengthNorm))
      *
      * @param {string[]} queryTokens - Query tokens
      * @param {number} docIndex - Document index in corpus
-     * @returns {number} BM25 score
+     * @returns {number} BM25+ score
      */
     scoreDocument(queryTokens, docIndex) {
         if (this.avgDocLength === 0) return 0; // Avoid division by zero
@@ -149,25 +392,38 @@ export class BM25Scorer {
 
         const docTF = this.documentTermFreqs[docIndex];
         const docLength = this.documentLengths[docIndex];
-        
+
         // Critical null checks to prevent crash with empty/invalid data
         if (!docTF || docLength === undefined || docLength === null) return 0;
 
         let score = 0;
+        let matchedTerms = 0;
 
         for (const token of queryTokens) {
-            const tf = docTF.get(token) || 0;
-            if (tf === 0) continue; // Term not in document
+            const rawTf = docTF.get(token) || 0;
+            if (rawTf === 0) continue; // Term not in document
+
+            matchedTerms++;
+
+            // Sublinear TF: log(1 + tf) prevents frequent terms from dominating
+            const tf = this.sublinearTf ? Math.log(1 + rawTf) : rawTf;
 
             const idf = this.idf.get(token) || 0;
 
             // Length normalization factor
             const lengthNorm = 1 - this.b + this.b * (docLength / this.avgDocLength);
 
-            // BM25 term score
+            // BM25+ term score
             const termScore = idf * (tf * (this.k1 + 1)) / (tf + this.k1 * lengthNorm);
 
             score += termScore;
+        }
+
+        // Coverage bonus: +10% when all query terms match
+        if (this.coverageBonus && queryTokens.length > 0) {
+            const coverage = matchedTerms / queryTokens.length;
+            const bonus = coverage * 0.1; // Up to 10% bonus
+            score *= (1 + bonus);
         }
 
         return score;
@@ -311,3 +567,8 @@ export function applyBM25Scoring(results, query, options = {}) {
 
     return scoredResults;
 }
+
+/**
+ * Export Porter Stemmer for use by other modules
+ */
+export { porterStemmer, tokenize, tokenizeSimple, STOP_WORDS };

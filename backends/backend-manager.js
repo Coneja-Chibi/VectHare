@@ -40,9 +40,35 @@ function normalizeBackendName(backendName) {
     return normalized;
 }
 
-// Multi-backend instance cache (allows different backends simultaneously)
+// VEC-25: Multi-backend instance cache with memory leak prevention
 const backendInstances = {};
 const backendHealthStatus = {};
+const backendAccessTimestamps = {}; // Track last access time for LRU eviction
+const MAX_CACHED_BACKENDS = 5; // Limit cache size to prevent unbounded growth
+
+/**
+ * Evict least recently used backend if cache is full
+ */
+function evictLRUBackendIfNeeded() {
+    const cachedCount = Object.keys(backendInstances).length;
+    if (cachedCount >= MAX_CACHED_BACKENDS) {
+        // Find least recently used backend
+        let oldestBackend = null;
+        let oldestTime = Infinity;
+        for (const [name, timestamp] of Object.entries(backendAccessTimestamps)) {
+            if (timestamp < oldestTime) {
+                oldestTime = timestamp;
+                oldestBackend = name;
+            }
+        }
+        if (oldestBackend) {
+            console.log(`VectHare: Evicting LRU backend from cache: ${oldestBackend}`);
+            delete backendInstances[oldestBackend];
+            delete backendHealthStatus[oldestBackend];
+            delete backendAccessTimestamps[oldestBackend];
+        }
+    }
+}
 
 /**
  * Initialize a specific backend (caches instances for reuse)
@@ -57,8 +83,12 @@ export async function initializeBackend(backendName, settings, throwOnFail = tru
 
     // If already have a healthy instance, return it
     if (backendInstances[normalizedName] && backendHealthStatus[normalizedName]) {
+        backendAccessTimestamps[normalizedName] = Date.now(); // Update access time
         return backendInstances[normalizedName];
     }
+
+    // VEC-25: Evict LRU backend if cache is full
+    evictLRUBackendIfNeeded();
 
     // Get backend class
     const BackendClass = BACKENDS[normalizedName];
@@ -91,6 +121,7 @@ export async function initializeBackend(backendName, settings, throwOnFail = tru
         // Cache the healthy instance
         backendInstances[normalizedName] = backend;
         backendHealthStatus[normalizedName] = true;
+        backendAccessTimestamps[normalizedName] = Date.now(); // VEC-25: Track access time
 
         console.log(`VectHare: Successfully initialized ${normalizedName} backend`);
         return backend;

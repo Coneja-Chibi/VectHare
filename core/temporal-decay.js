@@ -143,7 +143,10 @@ export function applyNostalgiaToResults(chunks, currentMessageId, nostalgiaSetti
             };
         }
 
-        const messageAge = currentMessageId - chunk.metadata.messageId;
+        // VEC-29: Parse messageId as number to prevent type coercion bugs
+        const chunkMessageId = parseInt(chunk.metadata.messageId, 10);
+        const currentMsgId = parseInt(currentMessageId, 10);
+        const messageAge = currentMsgId - chunkMessageId;
         const originalScore = chunk.score || 0;
         const boostedScore = applyNostalgiaBoost(originalScore, messageAge, nostalgiaSettings);
 
@@ -194,7 +197,10 @@ export function applyDecayToResults(chunks, currentMessageId, decaySettings) {
             };
         }
 
-        const messageAge = currentMessageId - chunk.metadata.messageId;
+        // VEC-29: Parse messageId as number to prevent type coercion bugs
+        const chunkMessageId = parseInt(chunk.metadata.messageId, 10);
+        const currentMsgId = parseInt(currentMessageId, 10);
+        const messageAge = currentMsgId - chunkMessageId;
         const originalScore = chunk.score || 0;
         const decayedScore = applyTemporalDecay(originalScore, messageAge, decaySettings);
 

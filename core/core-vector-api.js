@@ -820,6 +820,9 @@ export async function queryCollection(collectionId, searchText, topK, settings) 
 function scoreResults(resultsForBoost, searchText, topK, settings, overfetchAmount = null) {
     let finalResults;
 
+    // VEC-24: Ensure overfetchAmount has a valid fallback to prevent ReferenceError
+    const safeOverfetchAmount = overfetchAmount ?? resultsForBoost.length;
+
     // Determine scoring method from settings
     const scoringMethod = settings.keyword_scoring_method || 'keyword'; // 'keyword', 'bm25', or 'hybrid'
     if (scoringMethod === 'bm25') {
@@ -833,8 +836,8 @@ function scoreResults(resultsForBoost, searchText, topK, settings, overfetchAmou
         finalResults = bm25Results.slice(0, topK);
     } else if (scoringMethod === 'hybrid') {
         // Use both keyword boost and BM25
-        // Use overfetchAmount if provided, otherwise use the full results length for keyword boost
-        const keywordBoostLimit = overfetchAmount || resultsForBoost.length;
+        // VEC-24: Use safe overfetch amount
+        const keywordBoostLimit = safeOverfetchAmount;
         const keywordBoosted = applyKeywordBoosts(resultsForBoost, searchText, keywordBoostLimit);
         const hybridResults = applyBM25Scoring(keywordBoosted, searchText, {
             k1: settings.bm25_k1 || 1.5,

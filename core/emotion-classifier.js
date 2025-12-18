@@ -213,7 +213,8 @@ export async function testClassifierModel(model) {
             }
 
             const data = await response.json();
-            if (data?.classification?.length) {
+            // VEC-27: Validate array bounds before access
+            if (data?.classification?.length > 0 && data.classification[0]?.label) {
                 const topLabel = data.classification[0].label.toLowerCase();
                 allLabels.add(topLabel);
 

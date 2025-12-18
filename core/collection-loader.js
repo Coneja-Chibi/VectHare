@@ -149,7 +149,13 @@ export async function deleteCollection(collectionId, settings, registryKey = nul
     if (success) {
         console.log(`VectHare: ✓ Fully deleted collection ${collectionId}`);
     } else {
-        console.warn(`VectHare: Partial deletion of ${collectionId}:`, errors.join(', '));
+        // VEC-28: Warn about partial deletion to prevent zombie collections
+        const warningMsg = `VectHare: ⚠️ PARTIAL DELETION of ${collectionId} - may create zombie collection. Errors: ${errors.join(', ')}`;
+        console.error(warningMsg);
+        // Only treat as critical failure if ALL steps failed
+        if (!vectorsDeleted && !registryDeleted && !metadataDeleted) {
+            throw new Error(`Complete deletion failure for ${collectionId}: ${errors.join(', ')}`);
+        }
     }
 
     return {

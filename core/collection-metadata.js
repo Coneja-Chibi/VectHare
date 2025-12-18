@@ -192,12 +192,18 @@ export function getDefaultDecayForType(collectionType) {
  * Ensures the collections object exists in extension_settings
  */
 function ensureCollectionsObject() {
+    // VEC-26: Add proper null checks to prevent crashes
+    if (!extension_settings) {
+        console.error('VectHare: extension_settings is null/undefined - cannot access collections');
+        return false;
+    }
     if (!extension_settings.vecthare) {
         extension_settings.vecthare = {};
     }
     if (!extension_settings.vecthare.collections) {
         extension_settings.vecthare.collections = {};
     }
+    return true;
 }
 
 /**
@@ -206,7 +212,10 @@ function ensureCollectionsObject() {
  * @returns {object} Collection metadata (with defaults applied)
  */
 export function getCollectionMeta(collectionId) {
-    ensureCollectionsObject();
+    // VEC-26: Add comprehensive null checks
+    if (!ensureCollectionsObject()) {
+        return { ...defaultCollectionMeta };
+    }
 
     let stored = extension_settings.vecthare.collections[collectionId];
 

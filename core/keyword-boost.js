@@ -1,4 +1,5 @@
 import { porterStemmer } from './bm25-scorer.js';
+import { substituteParams } from '../../../../../script.js';
 
 /**
  * ============================================================================
@@ -244,13 +245,42 @@ const KEYWORD_STOP_WORDS = new Set([
 ]);
 
 /**
+ * Get combined stopwords (default + custom from settings)
+ * Processes ST macros like {{char}}, {{user}} in custom stopwords
+ * @param {object} settings - VectHare settings (optional)
+ * @returns {Set<string>} Combined stopwords set
+ */
+function getCombinedStopwords(settings = null) {
+    const combined = new Set(KEYWORD_STOP_WORDS);
+
+    // Add custom stopwords if settings provided
+    if (settings && settings.custom_stopwords && typeof settings.custom_stopwords === 'string') {
+        // Process ST macros ({{char}}, {{user}}, etc.) before splitting
+        const processedString = substituteParams(settings.custom_stopwords);
+        processedString = processedString.toLowerCase();
+        const customWords = processedString
+            .split(',')
+            .map(w => w.trim().toLowerCase())
+            .filter(w => w.length > 0);
+
+        for (const word of customWords) {
+            combined.add(word);
+        }
+    }
+
+    return combined;
+}
+
+/**
  * Extract keywords from a lorebook entry
  * @param {object} entry - Lorebook entry with key array
+ * @param {object} settings - VectHare settings (optional)
  * @returns {string[]} Array of keywords
  */
-export function extractLorebookKeywords(entry) {
+export function extractLorebookKeywords(entry, settings = null) {
     if (!entry) return [];
 
+    const stopwords = getCombinedStopwords(settings);
     const keywords = [];
 
     // Primary keys (trigger words)
@@ -260,7 +290,7 @@ export function extractLorebookKeywords(entry) {
                 const normalized = k.trim().toLowerCase();
                 // Filter out stop words - they're too common to be useful as keywords
                 // Don't stem: keys are often names/titles that should match exactly
-                if (!KEYWORD_STOP_WORDS.has(normalized) && normalized.length >= 2) {
+                if (!stopwords.has(normalized) && normalized.length >= 2) {
                     keywords.push(normalized);
                 }
             }
@@ -274,7 +304,7 @@ export function extractLorebookKeywords(entry) {
                 const normalized = k.trim().toLowerCase();
                 // Filter out stop words
                 // Don't stem: keys are often names/titles that should match exactly
-                if (!KEYWORD_STOP_WORDS.has(normalized) && normalized.length >= 2) {
+                if (!stopwords.has(normalized) && normalized.length >= 2) {
                     keywords.push(normalized);
                 }
             }
@@ -308,6 +338,8 @@ export function extractTextKeywords(text, options = {}) {
         return [];
     }
 
+    const stopwords = getCombinedStopwords(options.settings);
+
     // Step 1: Clean text - remove example citations and italics
     let cleanedText = text.replace(/\([^)]+\)/g, ' '); // Remove (parenthetical citations)
     cleanedText = cleanedText.replace(/\*[^*]+\*/g, ' '); // Remove *italicized examples*
@@ -333,7 +365,7 @@ export function extractTextKeywords(text, options = {}) {
     const wordCounts = new Map();
 
     for (const word of topicWords) {
-        if (KEYWORD_STOP_WORDS.has(word)) continue;
+        if (stopwords.has(word)) continue;
         // Don't stem proper nouns/names - they should match exactly
         const stemmed = properNouns.has(word) ? word : porterStemmer(word);
         wordCounts.set(stemmed, (wordCounts.get(stemmed) || 0) + 1);
@@ -413,6 +445,7 @@ export function extractChatKeywords(text, options = {}) {
 
     const baseWeight = options.baseWeight || DEFAULT_BASE_WEIGHT;
     const maxKeywords = options.maxKeywords || 8;
+    const stopwords = getCombinedStopwords(options.settings);
 
     const keywords = [];
     const seen = new Set();
@@ -426,7 +459,7 @@ export function extractChatKeywords(text, options = {}) {
         const word = match[1].toLowerCase();
 
         // Skip common words that happen to be capitalized
-        if (KEYWORD_STOP_WORDS.has(word)) continue;
+        if (stopwords.has(word)) continue;
 
         // Don't stem proper nouns - preserve names/titles exactly
         // Skip if already seen
@@ -482,6 +515,7 @@ export function extractBM25Keywords(text, options = {}) {
     const maxKeywords = options.maxKeywords || config.maxKeywords || 8;
     const minFrequency = config.minFrequency || 1;
     const minWordLength = options.minWordLength || 3;
+    const stopwords = getCombinedStopwords(options.settings);
 
     // Apply header size limit (scan area)
     let scanText = text;
@@ -523,7 +557,7 @@ export function extractBM25Keywords(text, options = {}) {
             .toLowerCase()
             .replace(/[^\w\s'-]/g, ' ')
             .split(/\s+/)
-            .filter(t => t.length >= minWordLength && !KEYWORD_STOP_WORDS.has(t))
+            .filter(t => t.length >= minWordLength && !stopwords.has(t))
             .map(t => {
                 // Don't stem proper nouns (names) - preserve them exactly
                 if (properNouns.has(t)) return t;
@@ -650,6 +684,7 @@ export function extractSmartKeywords(text, options = {}) {
     const maxKeywords = options.maxKeywords || config.maxKeywords || 8;
     const detectEntities = options.detectEntities !== false;
     const positionWeighting = options.positionWeighting !== false;
+    const stopwords = getCombinedStopwords(options.settings);
 
     // Apply header size limit
     let scanText = text;
@@ -684,7 +719,7 @@ export function extractSmartKeywords(text, options = {}) {
         let match;
         while ((match = properNounRegex.exec(text)) !== null) {
             const entity = match[1].toLowerCase();
-            if (!KEYWORD_STOP_WORDS.has(entity) && entity.length >= 3) {
+            if (!stopwords.has(entity) && entity.length >= 3) {
                 // Don't stem entities (names/titles) - preserve exactly
                 const position = getPositionWeight(match.index, text.length, positionWeighting);
                 const existing = keywordCandidates.get(entity);
@@ -729,7 +764,7 @@ export function extractSmartKeywords(text, options = {}) {
         return s.toLowerCase()
             .replace(/[^\w\s'-]/g, ' ')
             .split(/\s+/)
-            .filter(t => t.length >= 3 && !KEYWORD_STOP_WORDS.has(t))
+            .filter(t => t.length >= 3 && !stopwords.has(t))
             .map(t => {
                 // Don't stem proper nouns (names) - preserve them exactly
                 if (properNouns.has(t)) return t;

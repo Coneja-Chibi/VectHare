@@ -465,6 +465,17 @@ export function renderSettings(containerId, settings, callbacks) {
                                 </div>
                             </div>
 
+                            <!-- Custom Stopwords -->
+                            <div style="margin-top: 16px; padding: 12px; background: rgba(100,100,100,0.1); border-radius: 8px;">
+                                <label for="vecthare_custom_stopwords">
+                                    <small><b>Custom Stopwords</b></small>
+                                </label>
+                                <textarea id="vecthare_custom_stopwords" class="vecthare-textarea" rows="2"
+                                    placeholder="{{char}}, {{user}}, character, scene, location..."
+                                    style="margin-top: 4px;"></textarea>
+                                <small class="vecthare_hint">Words to exclude from keyword extraction. Supports ST macros: {{char}}, {{user}}, {{charIfNotGroup}}, etc.</small>
+                            </div>
+
                             <label for="vecthare_query_depth" style="margin-top: 12px;">
                                 <small>Query Depth: <span id="vecthare_query_depth_value">2</span> messages</small>
                             </label>
@@ -2093,6 +2104,15 @@ function bindSettingsEvents(settings, callbacks) {
             const value = parseInt($(this).val());
             const safeValue = isNaN(value) ? 3 : Math.max(1, Math.min(10, value));
             settings.world_info_query_depth = safeValue;
+            Object.assign(extension_settings.vecthare, settings);
+            saveSettingsDebounced();
+        });
+
+    // Custom stopwords
+    $('#vecthare_custom_stopwords')
+        .val(settings.custom_stopwords || '')
+        .on('input', function() {
+            settings.custom_stopwords = $(this).val();
             Object.assign(extension_settings.vecthare, settings);
             saveSettingsDebounced();
         });

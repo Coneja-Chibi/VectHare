@@ -116,19 +116,22 @@ async function clientSideHybridSearch(backend, collectionId, searchText, topK, s
         return { hashes: [], metadata: [] };
     }
 
-    // 2. Convert to format for BM25 scoring
+    // 2. Convert to format for BM25 scoring (include title and tags for field boosting)
     const resultsWithText = vectorResults.metadata.map((meta, idx) => ({
         hash: vectorResults.hashes[idx],
         text: meta.text || '',
+        title: meta.entryName || meta.title || '',
+        tags: meta.keywords || [],
         score: meta.score || 0,
         metadata: meta
     }));
 
-    // 3. Perform BM25 full-text search over the result set
+    // 3. Perform BM25 full-text search over the result set with field boosting
     console.log(`[HybridSearch] Computing BM25 scores for ${resultsWithText.length} results...`);
     const bm25Results = performBM25Search(resultsWithText, searchText, {
         k1: settings.bm25_k1 || 1.5,
-        b: settings.bm25_b || 0.75
+        b: settings.bm25_b || 0.75,
+        fieldBoosting: true  // Enable title (3x) and tags (2x) boosting
     });
 
     // 4. Fuse results

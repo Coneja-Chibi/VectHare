@@ -769,12 +769,18 @@ export async function queryCollection(collectionId, searchText, topK, settings) 
     // If source requires client-side embeddings, generate query vector
     if (clientSideEmbeddingSources.includes(settings.source)) {
         const queryItem = [searchText];
-        const additionalArgs = await getAdditionalArgs(queryItem, settings);
-        // additionalArgs.embeddings is a Record<string, number[]> where keys are original text
-        if (additionalArgs.embeddings && additionalArgs.embeddings[searchText]) {
-            queryVector = additionalArgs.embeddings[searchText];
-        } else {
-            throw new Error(`VectHare: Failed to generate query embedding for ${settings.source}`);
+        try {
+            const additionalArgs = await getAdditionalArgs(queryItem, settings);
+            // additionalArgs.embeddings is a Record<string, number[]> where keys are original text
+            if (additionalArgs.embeddings && additionalArgs.embeddings[searchText]) {
+                queryVector = additionalArgs.embeddings[searchText];
+            } else {
+                // VEC-35: Fallback to server-side embedding instead of failing completely
+                console.warn(`[VectHare] Client-side embedding generation returned empty result for ${settings.source}, falling back to server-side embedding`);
+            }
+        } catch (clientEmbedError) {
+            // VEC-35: Fallback to server-side embedding when client-side fails
+            console.warn(`[VectHare] Client-side embedding failed for ${settings.source}: ${clientEmbedError.message}. Falling back to server-side embedding.`);
         }
     }
 
@@ -872,13 +878,19 @@ export async function queryMultipleCollections(collectionIds, searchText, topK, 
 
     // Generate query vector once for all collections (efficiency)
     if (clientSideEmbeddingSources.includes(settings.source)) {
-        // getAdditionalArgs expects string[], not objects
-        const additionalArgs = await getAdditionalArgs([searchText], settings);
-        // additionalArgs.embeddings is a Record<string, number[]> where keys are original text
-        if (additionalArgs.embeddings && additionalArgs.embeddings[searchText]) {
-            queryVector = additionalArgs.embeddings[searchText];
-        } else {
-            throw new Error(`VectHare: Failed to generate query embedding for ${settings.source}`);
+        try {
+            // getAdditionalArgs expects string[], not objects
+            const additionalArgs = await getAdditionalArgs([searchText], settings);
+            // additionalArgs.embeddings is a Record<string, number[]> where keys are original text
+            if (additionalArgs.embeddings && additionalArgs.embeddings[searchText]) {
+                queryVector = additionalArgs.embeddings[searchText];
+            } else {
+                // VEC-35: Fallback to server-side embedding instead of failing completely
+                console.warn(`[VectHare] Client-side embedding generation returned empty result for ${settings.source}, falling back to server-side embedding`);
+            }
+        } catch (clientEmbedError) {
+            // VEC-35: Fallback to server-side embedding when client-side fails
+            console.warn(`[VectHare] Client-side embedding failed for ${settings.source}: ${clientEmbedError.message}. Falling back to server-side embedding.`);
         }
     }
 

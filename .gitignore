@@ -5,3 +5,5 @@ docs/*.md
 
 # Local development notes
 VECTOR_LIST.md
+
+node_modules/

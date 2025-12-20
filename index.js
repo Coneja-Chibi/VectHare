@@ -29,6 +29,7 @@ import { getChatCollectionId } from './core/chat-vectorization.js';
 import { getDefaultDecaySettings } from './core/temporal-decay.js';
 import { migrateOldEnabledKeys } from './core/collection-metadata.js';
 import { clearCollectionRegistry, discoverExistingCollections } from './core/collection-loader.js';
+import AsyncUtils from './utils/async-utils.js';
 
 // VectHare modules - UI
 import { renderSettings, openDiagnosticsModal, loadWebLlmModels, updateWebLlmStatus, refreshAutoSyncCheckbox } from './ui/ui-manager.js';
@@ -275,14 +276,34 @@ jQuery(async () => {
     // Initialize world info integration hooks
     initializeWorldInfoIntegration();
 
-    // Discover existing collections on load (async, non-blocking)
-    discoverExistingCollections(settings).then(collections => {
-        if (collections.length > 0) {
-            console.log(`VectHare: Discovered ${collections.length} existing collections`);
+    // VEC-34: Discover existing collections with retry mechanism
+    // Uses exponential backoff to handle temporary backend unavailability
+    (async () => {
+        try {
+            const collections = await AsyncUtils.retry(
+                () => discoverExistingCollections(settings),
+                {
+                    maxAttempts: 3,
+                    delay: 2000,
+                    maxDelay: 10000,
+                    backoffFactor: 2,
+                    onRetry: (attempt, error) => {
+                        console.warn(`VectHare: Collection discovery attempt ${attempt} failed: ${error.message}. Retrying...`);
+                    }
+                }
+            );
+            if (collections.length > 0) {
+                console.log(`VectHare: Discovered ${collections.length} existing collections`);
+            }
+        } catch (err) {
+            console.error('VectHare: Collection discovery failed after retries:', err.message);
+            toastr.warning(
+                'Could not discover existing collections. Open Database Browser to refresh manually.',
+                'VectHare: Collection Discovery Failed',
+                { timeOut: 10000 }
+            );
         }
-    }).catch(err => {
-        console.warn('VectHare: Collection discovery failed:', err.message);
-    });
+    })();
 
     // Register event handlers
     eventSource.on(event_types.MESSAGE_DELETED, onChatEvent);

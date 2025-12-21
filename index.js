@@ -7,7 +7,7 @@
  * All chunk operations go through unified /chunks/* endpoints.
  * Backend is specified via `backend` parameter in request body.
  *
- * @version 3.1.0
+ * @version 3.2.0
  */
 
 import path from 'node:path';
@@ -20,7 +20,7 @@ import qdrantBackend from './qdrant-backend.js';
 import milvusBackend from './milvus-backend.js';
 
 const pluginName = 'similharity';
-const pluginVersion = '3.1.0';
+const pluginVersion = '3.2.0';
 
 /**
  * Initialize the plugin
@@ -418,7 +418,7 @@ export async function init(router) {
                     },
 
                     delete: async (collectionId, hashes, source, model, directories, filters = {}) => {
-                        await qdrantBackend.deleteVectors(collectionId, hashes, filters);
+                        await qdrantBackend.deleteVectors(collectionId, hashes);
                         return hashes.length;
                     },
 
@@ -1281,6 +1281,121 @@ async function _getLegacySingleEmbedding(source, text, model, directories, req) 
 
         } catch (error) {
             console.error(`[${pluginName}] chunks/query error:`, error);
+            res.status(500).json({ error: error.message });
+        }
+    });
+
+    /**
+     * POST /api/plugins/similharity/chunks/hybrid-query
+     * Hybrid search combining vector similarity and keyword matching
+     * Body: { backend, collectionId, searchText OR queryVector, keywords?, topK?, options?, filters?, source?, model? }
+     */
+    router.post('/chunks/hybrid-query', async (req, res) => {
+        try {
+            const {
+                backend = 'qdrant',
+                collectionId,
+                queryVector,
+                searchText,
+                keywords,
+                topK = 10,
+                options = {},
+                filters = {},
+                source = 'transformers',
+                model = '',
+                hybridOptions = {}
+            } = req.body;
+
+            if (!collectionId) {
+                return res.status(400).json({ error: 'collectionId is required' });
+            }
+            if (!queryVector && !searchText) {
+                return res.status(400).json({ error: 'queryVector or searchText is required' });
+            }
+
+            // Only Qdrant, Milvus support native hybrid query
+            if (backend !== 'qdrant' && backend !== 'milvus') {
+                return res.status(400).json({ error: `Backend ${backend} does not support native hybrid query` });
+            }
+
+            // Generate embedding if searchText provided
+            let vector = queryVector;
+            if (!vector && searchText) {
+                vector = await getEmbeddingForSource(source, searchText, model, req.user.directories, req);
+            }
+
+            // Extract keywords if not provided
+            let extractedKeywords = keywords;
+            if (!extractedKeywords && searchText) {
+                // Simple keyword extraction: split by spaces, remove short words
+                extractedKeywords = searchText
+                    .toLowerCase()
+                    .split(/\s+/)
+                    .filter(word => word.length > 2)
+                    .slice(0, 10); // Limit to 10 keywords
+            }
+
+            // Merge hybridOptions with options
+            const mergedOptions = {
+                ...hybridOptions,
+                ...options
+            };
+
+            if (backend === 'qdrant') {
+                const results = await qdrantBackend.hybridQuery(
+                    collectionId,
+                    vector,
+                    extractedKeywords || [],
+                    topK,
+                    mergedOptions,
+                    filters
+                );
+
+                res.json({
+                    success: true,
+                    backend: 'qdrant',
+                    collectionId,
+                    count: results.length,
+                    results: results.map(r => ({
+                        hash: r.hash,
+                        text: r.text,
+                        score: r.score,
+                        metadata: r.metadata,
+                        vectorScore: r.debug?.vectorScore,
+                        textScore: r.debug?.keywordScore,
+                        debug: r.debug
+                    }))
+                });
+            } else if (backend === 'milvus') {
+                // Milvus hybrid query implementation (if available)
+                const results = await milvusBackend.hybridQuery(
+                    collectionId,
+                    vector,
+                    extractedKeywords || [],
+                    topK,
+                    mergedOptions,
+                    filters
+                );
+
+                res.json({
+                    success: true,
+                    backend: 'milvus',
+                    collectionId,
+                    count: results.length,
+                    results: results.map(r => ({
+                        hash: r.hash,
+                        text: r.text,
+                        score: r.score,
+                        metadata: r.metadata,
+                        vectorScore: r.debug?.vectorScore,
+                        textScore: r.debug?.keywordScore,
+                        debug: r.debug
+                    }))
+                });
+            }
+
+        } catch (error) {
+            console.error(`[${pluginName}] chunks/hybrid-query error:`, error);
             res.status(500).json({ error: error.message });
         }
     });

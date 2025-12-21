@@ -224,7 +224,7 @@ function createBrowserModal() {
                         <strong>Limited Discovery Mode</strong>
                         <span>Similharity plugin not detected. Only registered collections and current chat can be discovered.
                         Collections created outside VectHare won't appear here.
-                        <a href="https://github.com/SillyTavern/SillyTavern-Similharity-Plugin" target="_blank">Install the plugin</a> for full filesystem scanning.</span>
+                        <a href="https://github.com/Coneja-Chibi/VectHare/tree/Similharity-Plugin" target="_blank">Install the plugin</a> for full filesystem scanning.</span>
                     </div>
                 </div>
 

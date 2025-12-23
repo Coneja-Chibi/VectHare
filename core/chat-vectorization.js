@@ -1626,9 +1626,10 @@ export async function rearrangeChat(chat, settings, type) {
             return;
         }
 
-        if (chat.length < settings.protect) {
-            console.warn(`⚠️ VectHare: Not enough messages to inject chunks (${chat.length} < ${settings.protect})`);
-            console.log(`   💡 You need at least ${settings.protect} messages before chunk injection starts`);
+        const minChatLength = settings.min_chat_length ?? 0;
+        if (minChatLength > 0 && chat.length < minChatLength) {
+            console.warn(`⚠️ VectHare: Not enough messages to inject chunks (${chat.length} < ${minChatLength})`);
+            console.log(`   💡 You need at least ${minChatLength} messages before chunk injection starts`);
             return;
         }
 

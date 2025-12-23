@@ -394,6 +394,12 @@ export function renderSettings(containerId, settings, callbacks) {
                             <input type="range" id="vecthare_insert_batch_size" class="vecthare-slider" min="10" max="100" step="10" />
                             <small class="vecthare_hint">Chunks per insert batch (50-100 recommended for faster bulk operations)</small>
 
+                            <label for="vecthare_min_chat_length" style="margin-top: 16px;">
+                                <small>Minimum Messages Before Injection</small>
+                            </label>
+                            <input type="number" id="vecthare_min_chat_length" class="vecthare-input" min="0" max="100" step="1" placeholder="0" />
+                            <small class="vecthare_hint">Minimum number of messages in chat before RAG injection starts (0 = inject immediately)</small>
+
                             <label for="vecthare_score_threshold">
                                 <small>Similarity Threshold: <span id="vecthare_threshold_value">0.25</span></small>
                             </label>
@@ -2643,6 +2649,16 @@ function bindSettingsEvents(settings, callbacks) {
             saveSettingsDebounced();
         });
     $('#vecthare_insert_batch_size_value').text(settings.insert_batch_size || 50);
+
+    // Minimum chat length before injection starts
+    $('#vecthare_min_chat_length')
+        .val(settings.min_chat_length ?? 0)
+        .on('input', function() {
+            const value = parseInt($(this).val());
+            settings.min_chat_length = isNaN(value) ? 0 : Math.max(0, value);
+            Object.assign(extension_settings.vecthare, settings);
+            saveSettingsDebounced();
+        });
 
     // Action buttons
     $('#vecthare_vectorize_content').on('click', () => {

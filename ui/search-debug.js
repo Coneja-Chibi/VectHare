@@ -1485,7 +1485,7 @@ Collection: ${d.collectionId}
 SETTINGS
   Threshold: ${s.threshold}
   Top K: ${s.topK}
-  Protect Messages: ${s.protect} (last ${s.protect} of ${s.chatLength} total)
+  Min Chat Length: ${s.min_chat_length ?? 0} (current: ${s.chatLength} messages)
   Temporal Decay: ${s.temporal_decay?.enabled ? `ON (half-life: ${s.temporal_decay.halfLife || s.temporal_decay.half_life})` : 'OFF'}
 
 PIPELINE RESULTS

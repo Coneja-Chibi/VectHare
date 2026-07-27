@@ -331,7 +331,10 @@ function createBrowserModal() {
                             <!-- Search Options -->
                             <div class="vecthare-search-options">
                                 <div class="vecthare-search-option">
-                                    <label>Results per collection:</label>
+                                    <!-- ST's multiQueryCollection applies topK as a single global cap across the
+                                         merged results of every searched collection, not per-collection - label
+                                         must match actual server behavior (VectHare audit ui-a finding #11). -->
+                                    <label>Total results:</label>
                                     <input type="number" id="vecthare_search_topk" value="5" min="1" max="50">
                                 </div>
                                 <div class="vecthare-search-option">
@@ -3214,8 +3217,13 @@ function renderSearchResults(results, query, originalResults = null) {
       (c) => c.id === collectionId,
     );
     const collectionName = collection?.name || collectionId;
-    // Use registryKey for unique identification (source:id format)
-    const uniqueKey = collection.registryKey || collection.id;
+    // Use registryKey for unique identification (source:id format). `collection` can be
+    // undefined here: performSearch() awaits queryMultipleCollections() using the
+    // collection-ID set at search time, but browserState.collections can be
+    // replaced/filtered (Delete/Resync on the Collections tab) while that await is in
+    // flight, so a result's collectionId may no longer have a matching entry by the time
+    // this renders - guard every read the same way `collectionName` above already does.
+    const uniqueKey = collection?.registryKey || collectionId;
 
     html += `
             <div class="vecthare-search-collection">
@@ -3273,8 +3281,8 @@ function renderSearchResults(results, query, originalResults = null) {
 
                 <button class="vecthare-btn-sm vecthare-action-visualize"
                         data-collection-key="${uniqueKey}"
-                        data-backend="${collection.backend}"
-                        data-source="${collection.source || "transformers"}"
+                        data-backend="${collection?.backend || "standard"}"
+                        data-source="${collection?.source || "transformers"}"
                         title="View and edit chunks in this collection">
                     ${icons.eye(16)} View Chunks
                 </button>
@@ -3776,6 +3784,7 @@ function openCollectionLockDialog(collectionId) {
         toastr.success('Collection locked to current chat', 'VectHare');
 
         // Re-open dialog with updated state
+        $(document).off('keydown.lock_dialog');
         $dialog.remove();
         refreshActivationLockButton();
         openCollectionLockDialog(collectionId);
@@ -3794,6 +3803,7 @@ function openCollectionLockDialog(collectionId) {
         toastr.success('Collection locked to current character', 'VectHare');
 
         // Re-open dialog with updated state
+        $(document).off('keydown.lock_dialog');
         $dialog.remove();
         refreshActivationLockButton();
         openCollectionLockDialog(collectionId);
@@ -3808,6 +3818,7 @@ function openCollectionLockDialog(collectionId) {
         toastr.info('Removed lock from chat', 'VectHare');
 
         // Re-open dialog with updated state
+        $(document).off('keydown.lock_dialog');
         $dialog.remove();
         refreshActivationLockButton();
         openCollectionLockDialog(collectionId);
@@ -3822,6 +3833,7 @@ function openCollectionLockDialog(collectionId) {
         toastr.info('Removed lock from character', 'VectHare');
 
         // Re-open dialog with updated state
+        $(document).off('keydown.lock_dialog');
         $dialog.remove();
         refreshActivationLockButton();
         openCollectionLockDialog(collectionId);
@@ -3830,6 +3842,7 @@ function openCollectionLockDialog(collectionId) {
     // Handle close button
     $dialog.find('[data-action="close"]').on('click', function(e) {
         e.preventDefault();
+        $(document).off('keydown.lock_dialog');
         $dialog.remove();
     });
 
@@ -3841,13 +3854,19 @@ function openCollectionLockDialog(collectionId) {
     // Close on background click
     $dialog.on('click', function(e) {
         if (e.target === this) {
+            $(document).off('keydown.lock_dialog');
             $dialog.remove();
         }
     });
 
-    // Handle escape key
-    $(document).one('keydown.lock_dialog', function(e) {
+    // Handle escape key. Namespaced off().on() (not .one()) so a non-Escape keypress
+    // doesn't consume/disarm this handler - .one() fired (and removed itself) on the
+    // very first keydown of ANY kind, silently disabling Escape-to-close after e.g. Tab.
+    // off() first also ensures re-opening this dialog (the four re-open paths above, or
+    // opening it again after a stale close) never stacks a second handler.
+    $(document).off('keydown.lock_dialog').on('keydown.lock_dialog', function(e) {
         if (e.key === 'Escape') {
+            $(document).off('keydown.lock_dialog');
             $dialog.remove();
         }
     });

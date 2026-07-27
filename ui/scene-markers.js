@@ -19,6 +19,7 @@ import {
     deleteSceneChunk,
     getCurrentCollectionId,
     filterSceneChunks,
+    getContainedChunkHashes,
 } from '../core/scenes.js';
 import { getSavedHashes } from '../core/core-vector-api.js';
 import { eventSource, event_types } from '../../../../../script.js';
@@ -40,6 +41,12 @@ const BOOKMARK_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height=
 let cachedSceneChunks = [];
 let pendingSceneStart = null;
 let currentSettings = null;
+// True once cachedSceneChunks reflects a confirmed read of the scene metadata (either
+// "no collection, so no scenes" or a successful metadata fetch). getSavedHashes(...,
+// includeMetadata=true) silently falls back to returning a bare hashes[] array (no
+// `.metadata`) whenever the similharity chunks-list plugin call fails or isn't installed -
+// that is NOT the same as "zero scenes exist" and must not be treated as such.
+let cacheValid = true;
 
 // ============================================================================
 // CACHE MANAGEMENT
@@ -53,13 +60,16 @@ export async function refreshSceneCache(settings) {
 
     const collectionId = getCurrentCollectionId();
     if (!collectionId || !currentSettings) {
+        // Genuinely no scenes possible (no chat/collection) - this is a confirmed, valid
+        // empty state, not an ambiguous failure.
         cachedSceneChunks = [];
+        cacheValid = true;
         return;
     }
 
     try {
         const result = await getSavedHashes(collectionId, currentSettings, true);
-        if (result.metadata) {
+        if (result && !Array.isArray(result) && result.metadata) {
             cachedSceneChunks = result.metadata
                 .filter(m => m.isScene === true)
                 .map(m => ({
@@ -69,14 +79,29 @@ export async function refreshSceneCache(settings) {
                     containedHashes: m.containedHashes || [],
                     title: m.title || '',
                 }));
+            cacheValid = true;
         } else {
-            cachedSceneChunks = [];
+            // Ambiguous result (bare hashes[] because the metadata plugin call failed or
+            // isn't installed) - leave the last known-good cache untouched instead of
+            // wiping it to [], and mark it stale so callers refuse to create scenes until
+            // a successful refresh.
+            cacheValid = false;
+            console.warn('VectHare Scenes: Could not verify scene cache (metadata unavailable) - keeping previous cache, marked stale');
         }
-        console.log(`VectHare Scenes: Cached ${cachedSceneChunks.length} scenes`);
+        console.log(`VectHare Scenes: Cached ${cachedSceneChunks.length} scenes (valid: ${cacheValid})`);
     } catch (error) {
         console.error('VectHare Scenes: Failed to refresh cache', error);
-        cachedSceneChunks = [];
+        // Leave cachedSceneChunks untouched - a thrown error is not evidence of "zero scenes".
+        cacheValid = false;
     }
+}
+
+/**
+ * Whether the scene cache reflects a confirmed read (not a fallback/failed metadata fetch)
+ * @returns {boolean}
+ */
+export function isSceneCacheValid() {
+    return cacheValid;
 }
 
 /**
@@ -180,14 +205,21 @@ function attachMarkersToMessage(messageElement) {
     const startButton = createStartMarker();
     const endButton = createEndMarker();
 
+    // Resolve mesid from the DOM at click time, not the `messageId` closed over when
+    // markers were attached. ST renumbers `mesid` on surviving `.mes` elements in place
+    // after a message delete/insert (updateViewMessageIds()) without recreating them, and
+    // the dedup guard at the top of this function (`querySelector('.START_MARKER_CLASS')`)
+    // means these listeners are never rebound - so the closed-over value goes stale.
     startButton.addEventListener('click', function(e) {
         e.stopPropagation();
-        handleStartClick(messageId);
+        const currentId = getMessageId(messageElement);
+        if (currentId !== null) handleStartClick(currentId);
     });
 
     endButton.addEventListener('click', function(e) {
         e.stopPropagation();
-        handleEndClick(messageId);
+        const currentId = getMessageId(messageElement);
+        if (currentId !== null) handleEndClick(currentId);
     });
 
     const firstButton = mesButtons.querySelector('.mes_button');
@@ -296,6 +328,14 @@ async function handleStartClick(messageId) {
         return;
     }
 
+    // Refuse to create/modify scenes against a cache we couldn't confirm is current -
+    // a stale cache silently disarms the duplicate/overlap guards below (they all read
+    // from cachedSceneChunks) and can produce overlapping duplicate scene chunks.
+    if (!cacheValid) {
+        toastr.error('Scene data could not be verified - try again in a moment');
+        return;
+    }
+
     const existingSceneStart = getSceneStartingAt(messageId);
     const existingSceneAt = getSceneAtMessage(messageId);
 
@@ -336,28 +376,48 @@ async function handleStartClick(messageId) {
             `This message is inside an existing scene (${existingSceneAt.sceneStart}-${existingSceneAt.sceneEnd}).\n\nSplit it? The existing scene will end at message ${messageId - 1}, and a new scene will start here.`
         );
         if (confirmSplit) {
-            // Delete old scene
+            // Create the shortened original BEFORE deleting the existing scene chunk (if
+            // it would have at least 1 message). Previously this deleted the existing
+            // scene first and only warned on create failure, which could silently destroy
+            // the original scene with no replacement if creation then failed (backend
+            // down, empty scene text, insertVectorItems throwing).
+            const needsShortenedOriginal = messageId - 1 >= existingSceneAt.sceneStart;
+            let shortenedResult = null;
+
+            if (needsShortenedOriginal) {
+                shortenedResult = await createSceneChunk(
+                    existingSceneAt.sceneStart,
+                    messageId - 1,
+                    { title: existingSceneAt.title },
+                    currentSettings
+                );
+                if (!shortenedResult.success) {
+                    toastr.error(shortenedResult.error || 'Failed to create shortened scene - original scene left unchanged');
+                    return;
+                }
+            }
+
+            // Now delete the original scene chunk - the shortened replacement (if needed)
+            // already exists at this point.
             const deleteResult = await deleteSceneChunk(
                 existingSceneAt.hash,
                 existingSceneAt.containedHashes,
                 currentSettings
             );
             if (!deleteResult.success) {
-                toastr.error('Failed to modify existing scene');
-                return;
-            }
-
-            // Create shortened scene (if it would have at least 1 message)
-            if (messageId - 1 >= existingSceneAt.sceneStart) {
-                const createResult = await createSceneChunk(
-                    existingSceneAt.sceneStart,
-                    messageId - 1,
-                    { title: existingSceneAt.title },
-                    currentSettings
-                );
-                if (!createResult.success) {
-                    toastr.warning('Split scene created but shortened original failed');
+                // Roll back the shortened replacement so we don't end up with both the
+                // full original AND an overlapping shortened scene. createSceneChunk()
+                // doesn't return the contained hashes it disabled, so recompute them the
+                // same way it did (same message range) to pass to deleteSceneChunk().
+                if (shortenedResult?.success) {
+                    const context = getContext();
+                    const rollbackHashes = context?.chat
+                        ? getContainedChunkHashes(context.chat, existingSceneAt.sceneStart, messageId - 1)
+                        : [];
+                    await deleteSceneChunk(shortenedResult.hash, rollbackHashes, currentSettings);
                 }
+                toastr.error(deleteResult.error || 'Failed to modify existing scene - split aborted');
+                return;
             }
 
             // Set pending start
@@ -409,6 +469,12 @@ async function handleStartClick(messageId) {
 async function handleEndClick(messageId) {
     if (!currentSettings) {
         toastr.error('VectHare settings not loaded');
+        return;
+    }
+
+    // See handleStartClick() - refuse to create scenes against an unconfirmed cache.
+    if (!cacheValid) {
+        toastr.error('Scene data could not be verified - try again in a moment');
         return;
     }
 
@@ -503,6 +569,13 @@ export function initializeSceneMarkers() {
             attachAllMarkers();
             updateAllMarkerStates();
         }, 200);
+    });
+
+    // ST renumbers `mesid` on surviving message elements after a delete
+    // (updateViewMessageIds()) without emitting a per-message re-render event - refresh
+    // marker state so highlighting/visibility reflects the new indices immediately.
+    eventSource.on(event_types.MESSAGE_DELETED, () => {
+        updateAllMarkerStates();
     });
 
     console.log('VectHare Scenes: Markers initialized');

@@ -25,7 +25,7 @@ import {
     CHARACTER_FIELDS,
 } from '../core/content-types.js';
 import { extension_settings, getContext } from '../../../../extensions.js';
-import { saveSettingsDebounced } from '../../../../../script.js';
+import { saveSettingsDebounced, getRequestHeaders } from '../../../../../script.js';
 import { getChatUUID } from '../core/chat-vectorization.js';
 import { callGenericPopup, POPUP_TYPE } from '../../../../popup.js';
 import { openTextCleaningManager } from './text-cleaning-manager.js';
@@ -74,6 +74,7 @@ export function openContentVectorizer(initialType = null) {
  * Closes the modal
  */
 export function closeContentVectorizer() {
+    $(document).off('.vecthareCV');
     $('#vecthare_content_vectorizer_modal').fadeOut(200, function() {
         $(this).remove();
     });
@@ -696,7 +697,8 @@ function updateChunkingSection(type) {
     // Get strategy-specific defaults if available
     const strategyDefaults = currentStrategy || {};
     const chunkSize = currentSettings.chunkSize || strategyDefaults.defaultSize || defaults.chunkSize;
-    const chunkOverlap = currentSettings.chunkOverlap || strategyDefaults.defaultOverlap || defaults.chunkOverlap;
+    // `??` (not `||`) so a deliberate overlap of 0 ("Off") isn't treated as unset.
+    const chunkOverlap = currentSettings.chunkOverlap ?? strategyDefaults.defaultOverlap ?? defaults.chunkOverlap;
 
     // Update size controls values
     $('#vecthare_cv_chunk_size').val(chunkSize);
@@ -836,12 +838,11 @@ function renderScopeOptions(type) {
     const hasChat = !!context?.chatId;
     let chatName = 'No chat';
     if (hasChat) {
-        // Try to get a meaningful chat name
-        if (typeof chat_metadata !== 'undefined' && chat_metadata?.chat_name) {
-            chatName = chat_metadata.chat_name;
-        } else {
-            chatName = `Chat #${context.chatId}`;
-        }
+        // Try to get a meaningful chat name. `chat_metadata` is a script.js export that
+        // isn't imported into this module (so the old `typeof chat_metadata !== 'undefined'`
+        // check was always false) - getContext().chatMetadata is the right accessor here.
+        const chatMetaName = context?.chatMetadata?.chat_name;
+        chatName = chatMetaName || `Chat #${context.chatId}`;
     }
 
     const scopeData = [
@@ -1081,6 +1082,13 @@ function renderTextCleaningOptions() {
  * Binds all event handlers
  */
 function bindEvents() {
+    // bindEvents() runs once per openContentVectorizer() call and registers permanent
+    // $(document).on('change.vecthareCV', ...) delegated handlers below. Unbind the
+    // namespace first so repeated open/close cycles don't stack duplicate handlers -
+    // closeContentVectorizer() also unbinds on close, but this guards reopening without
+    // a clean close in between.
+    $(document).off('.vecthareCV');
+
     // Close handlers
     $('#vecthare_cv_close, #vecthare_cv_cancel').on('click', closeContentVectorizer);
     $('#vecthare_content_vectorizer_modal .vecthare-modal-overlay').on('click', closeContentVectorizer);
@@ -1146,26 +1154,43 @@ function bindEvents() {
     });
 
     // Scope selection
-    $(document).on('change', 'input[name="vecthare_cv_scope"]', function() {
+    $(document).on('change.vecthareCV','input[name="vecthare_cv_scope"]', function() {
         currentSettings.scope = $(this).val();
         $('.vecthare-cv-scope-option').removeClass('selected');
         $(this).closest('.vecthare-cv-scope-option').addClass('selected');
     });
 
+    // Character field selection checkboxes - previously had no handler, so
+    // currentSettings.fields always stayed at the hard-coded defaults regardless of
+    // what the user checked/unchecked.
+    $(document).on('change.vecthareCV','input[name="vecthare_cv_field"]', function() {
+        const fieldId = $(this).val();
+        const checked = $(this).prop('checked');
+        // Clone before mutating - currentSettings.fields may still be the same object
+        // reference as CONTENT_TYPES.character.defaults.fields from the initial spread.
+        currentSettings.fields = { ...(currentSettings.fields || {}), [fieldId]: checked };
+    });
+
+    // Lorebook "Include Disabled Entries" checkbox - previously had no handler and no
+    // default, so currentSettings.includeDisabled was always undefined.
+    $(document).on('change.vecthareCV','#vecthare_cv_include_disabled', function() {
+        currentSettings.includeDisabled = $(this).prop('checked');
+    });
+
     // Keyword level dropdown
-    $(document).on('change', '#vecthare_cv_keyword_level', function() {
+    $(document).on('change.vecthareCV','#vecthare_cv_keyword_level', function() {
         currentSettings.keywordLevel = $(this).val();
     });
 
     // Keyword base weight
-    $(document).on('change', '#vecthare_cv_keyword_weight', function() {
+    $(document).on('change.vecthareCV','#vecthare_cv_keyword_weight', function() {
         const value = parseFloat($(this).val());
         currentSettings.keywordBaseWeight = isNaN(value) ? 1.5 : Math.min(3.0, Math.max(0.01, value));
         $(this).val(currentSettings.keywordBaseWeight);
     });
 
     // Temporal weighting enable/disable
-    $(document).on('change', '#vecthare_cv_temporal_decay', function() {
+    $(document).on('change.vecthareCV','#vecthare_cv_temporal_decay', function() {
         const isEnabled = $(this).prop('checked');
         if (!currentSettings.temporalDecay) {
             currentSettings.temporalDecay = { enabled: false, type: 'decay', mode: 'exponential' };
@@ -1177,7 +1202,7 @@ function bindEvents() {
     });
 
     // Temporal weighting type toggle (decay vs nostalgia)
-    $(document).on('change', 'input[name="vecthare_cv_decay_type"]', function() {
+    $(document).on('change.vecthareCV','input[name="vecthare_cv_decay_type"]', function() {
         const type = $(this).val();
         if (!currentSettings.temporalDecay) {
             currentSettings.temporalDecay = { enabled: true, type: 'decay', mode: 'exponential' };
@@ -1192,7 +1217,7 @@ function bindEvents() {
     });
 
     // Temporal weighting curve toggle (exponential vs linear)
-    $(document).on('change', 'input[name="vecthare_cv_decay_mode"]', function() {
+    $(document).on('change.vecthareCV','input[name="vecthare_cv_decay_mode"]', function() {
         const mode = $(this).val();
         if (!currentSettings.temporalDecay) {
             currentSettings.temporalDecay = { enabled: true, type: 'decay', mode: 'exponential' };
@@ -1207,25 +1232,25 @@ function bindEvents() {
     });
 
     // Temporal weighting numeric inputs
-    $(document).on('change', '#vecthare_cv_decay_halflife', function() {
+    $(document).on('change.vecthareCV','#vecthare_cv_decay_halflife', function() {
         if (!currentSettings.temporalDecay) currentSettings.temporalDecay = {};
         currentSettings.temporalDecay.halfLife = parseInt($(this).val()) || 50;
     });
-    $(document).on('change', '#vecthare_cv_decay_rate', function() {
+    $(document).on('change.vecthareCV','#vecthare_cv_decay_rate', function() {
         if (!currentSettings.temporalDecay) currentSettings.temporalDecay = {};
         currentSettings.temporalDecay.linearRate = parseFloat($(this).val()) || 0.01;
     });
-    $(document).on('change', '#vecthare_cv_decay_min', function() {
+    $(document).on('change.vecthareCV','#vecthare_cv_decay_min', function() {
         if (!currentSettings.temporalDecay) currentSettings.temporalDecay = {};
         currentSettings.temporalDecay.minRelevance = parseFloat($(this).val()) || 0.3;
     });
-    $(document).on('change', '#vecthare_cv_decay_max_boost', function() {
+    $(document).on('change.vecthareCV','#vecthare_cv_decay_max_boost', function() {
         if (!currentSettings.temporalDecay) currentSettings.temporalDecay = {};
         currentSettings.temporalDecay.maxBoost = parseFloat($(this).val()) || 1.2;
     });
 
     // Cleaning preset dropdown
-    $(document).on('change', '#vecthare_cv_cleaning_preset', function() {
+    $(document).on('change.vecthareCV','#vecthare_cv_cleaning_preset', function() {
         const presetId = $(this).val();
         currentSettings.cleaningPreset = presetId;
 
@@ -1753,10 +1778,14 @@ async function fetchUrl() {
     preview.hide();
 
     try {
-        // Use ST's readability endpoint if available
-        const response = await fetch('/api/serpapi/visit', {
+        // Use ST's page-visit endpoint. It requires the CSRF header (like every other ST
+        // endpoint) and returns the raw HTML body, not a JSON envelope - it never had a
+        // `content`/`text` field to read. Extract text/title from the HTML client-side,
+        // the same way ST's own URL scraper (public/scripts/scrapers.js) treats the result
+        // as a page to parse rather than a JSON API response.
+        const response = await fetch('/api/search/visit', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getRequestHeaders(),
             body: JSON.stringify({ url }),
         });
 
@@ -1764,8 +1793,11 @@ async function fetchUrl() {
             throw new Error(`HTTP ${response.status}`);
         }
 
-        const data = await response.json();
-        const content = data.content || data.text || '';
+        const html = await response.text();
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        doc.querySelectorAll('script, style, noscript').forEach(el => el.remove());
+        const content = (doc.body?.textContent || '').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+        const title = doc.querySelector('title')?.textContent?.trim() || url;
 
         if (!content || content.length < 50) {
             throw new Error('No meaningful content found on page');
@@ -1775,7 +1807,7 @@ async function fetchUrl() {
             type: 'url',
             url: url,
             content: content,
-            title: data.title || url,
+            title: title,
         };
 
         status.html('');
@@ -1842,7 +1874,7 @@ async function isWikiPluginAvailable(wikiType) {
 
         const response = await fetch(endpoint, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getRequestHeaders(),
         });
 
         return response.ok;
@@ -1890,7 +1922,7 @@ async function scrapeWiki() {
 
         const response = await fetch(endpoint, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getRequestHeaders(),
             body: JSON.stringify(requestBody),
         });
 
@@ -2001,7 +2033,7 @@ async function fetchYouTubeTranscript() {
     try {
         const response = await fetch('/api/search/transcript', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getRequestHeaders(),
             body: JSON.stringify({ id: videoId, lang: lang || undefined }),
         });
 
@@ -2268,7 +2300,7 @@ async function previewChunks() {
         const chunks = await chunkText(contentText, {
             strategy: currentSettings.strategy || type.defaultStrategy,
             chunkSize: currentSettings.chunkSize || type.defaults.chunkSize,
-            chunkOverlap: currentSettings.chunkOverlap || type.defaults.chunkOverlap,
+            chunkOverlap: currentSettings.chunkOverlap ?? type.defaults.chunkOverlap,
         });
 
         // Handle empty or undefined chunks
@@ -2424,8 +2456,10 @@ async function startVectorization() {
         return;
     }
 
-    // Check if vectors already exist for this content (chat specifically)
-    if (currentContentType === 'chat' && source.sourceType === 'current') {
+    // Check if vectors already exist for this content (chat specifically).
+    // getSourceData() sets `type`, not `sourceType` - this guard was dead code, so
+    // re-vectorizing the current chat silently duplicated chunks with no warning.
+    if (currentContentType === 'chat' && source.type === 'current') {
         try {
             const { doesChatHaveVectors } = await import('../core/collection-loader.js');
             const existing = await doesChatHaveVectors(currentSettings);

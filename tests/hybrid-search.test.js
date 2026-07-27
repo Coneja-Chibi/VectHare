@@ -10,8 +10,15 @@ vi.mock('../backends/backend-manager.js', () => ({
     getBackend: vi.fn(),
 }));
 
-// Mock the bm25-scorer - provide a working implementation
+// Mock the bm25-scorer - provide a working implementation.
+// Includes `tokenize` because core/hybrid-search.js's performBM25Search() now imports and
+// calls the real tokenize() (VectHare audit core-b finding #2: it previously tokenized the
+// query with a raw lowercase split instead of the same stemmed/stopword-filtered tokenize()
+// used to build the BM25 index, so query terms never matched index terms). The mock here
+// mirrors that same raw split so scoreDocument()'s plain substring matching below keeps
+// working against un-stemmed terms, consistent with this test file's existing expectations.
 vi.mock('../core/bm25-scorer.js', () => ({
+    tokenize: vi.fn((text) => (text || '').toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(t => t.length > 0)),
     createBM25Scorer: vi.fn((documents, options) => {
         // Simple mock BM25 scorer that scores based on query term overlap
         const docs = documents.map(d => {

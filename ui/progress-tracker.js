@@ -71,12 +71,26 @@ export class ProgressTracker {
             this.elements.statLabel.textContent = itemLabel;
         }
 
+        // Explicitly reset DOM state left over from a previous run - updateDisplay()'s
+        // errors branch only ever sets display:block (never back to 'none'), and
+        // updateCurrentItem(null) is what hides the "current item" row, so neither gets
+        // cleared just by resetting `this.stats` above.
+        if (this.elements?.errors) this.elements.errors.style.display = 'none';
+        if (this.elements?.errorsList) this.elements.errorsList.innerHTML = '';
+        if (this.elements?.current) this.elements.current.style.display = 'none';
+
+        // Make the panel visible and mark it as such BEFORE calling updateDisplay(),
+        // which early-returns when !this.isVisible - otherwise the panel becomes visible
+        // still showing the *previous* run's rendered state (title/bar/status) until the
+        // next updateProgress()/updateBatch() call, which never happens if this run fails
+        // before its first progress callback.
+        this.panel.style.display = 'block';
+        this.isVisible = true;
+
         // Start/restart time updater
         this.startTimeUpdater();
 
         this.updateDisplay();
-        this.panel.style.display = 'block';
-        this.isVisible = true;
     }
 
     /**
@@ -88,6 +102,14 @@ export class ProgressTracker {
         }
         this.isVisible = false;
         this.currentOperation = null;
+
+        // Stop the time updater - previously only complete() did this, so closing the
+        // panel mid-operation (or a caller that throws before reaching complete()) left
+        // the 100ms interval running for the lifetime of the page.
+        if (this.timeIntervalId) {
+            clearInterval(this.timeIntervalId);
+            this.timeIntervalId = null;
+        }
     }
 
     /**
@@ -140,13 +162,6 @@ export class ProgressTracker {
             console.log(`[ProgressTracker] Batch completed: ${batchSize} chunks in ${this.stats.lastBatchTime}ms`);
         }
         
-        this.stats.embeddedChunks = embeddedChunks;
-        this.stats.totalChunksToEmbed = totalChunksToEmbed;
-        this.updateDisplay();
-    }
-
-    /**
-     * Update current item being processed (e.g., "Message 3, Chunk 2/5")
         this.stats.embeddedChunks = embeddedChunks;
         this.stats.totalChunksToEmbed = totalChunksToEmbed;
         this.updateDisplay();
@@ -373,6 +388,8 @@ export class ProgressTracker {
         if (this.stats.errors.length > 0) {
             this.updateErrorsList();
             if (els.errors) els.errors.style.display = 'block';
+        } else if (els.errors) {
+            els.errors.style.display = 'none';
         }
     }
 
@@ -387,7 +404,7 @@ export class ProgressTracker {
             const progressPercent = (this.stats.embeddedChunks / this.stats.totalChunksToEmbed) * 100;
             if (progressPercent < 100) {
                 return 'Processing chunks...';
-9            } else {
+            } else {
                 return 'Finalizing...';
             }
         } else if (this.stats.processedItems >= this.stats.totalItems) {

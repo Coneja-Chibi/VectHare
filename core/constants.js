@@ -75,6 +75,9 @@ export const SENTENCE_SEARCH_WINDOW = 50;
 /** Default half-life for temporal effects (messages until 50% effect) */
 export const DEFAULT_DECAY_HALF_LIFE = 50;
 
+/** Default half-life for nostalgia mode (messages until 50% of max boost) */
+export const DEFAULT_NOSTALGIA_HALF_LIFE = 50;
+
 /** Default floor for temporal decay (minimum score multiplier) */
 export const DEFAULT_DECAY_FLOOR = 0.3;
 

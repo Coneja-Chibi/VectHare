@@ -331,6 +331,23 @@ function insertChunkBeforeIEND(originalPng, newChunk) {
  * @param {string} text - Text to compress
  * @returns {Promise<Uint8Array>} zTXt chunk
  */
+/**
+ * Encodes bytes as base64 in fixed-size slices to avoid blowing the call stack.
+ * `btoa(String.fromCharCode(...bytes))` spreads the whole array as function arguments,
+ * which throws "Maximum call stack size exceeded" on large exports (tens of thousands of
+ * bytes). Feeding String.fromCharCode.apply() in bounded chunks avoids that.
+ * @param {Uint8Array} bytes
+ * @returns {string} base64-encoded string
+ */
+function bytesToBase64(bytes) {
+    const CHUNK_SIZE = 8192;
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK_SIZE));
+    }
+    return btoa(binary);
+}
+
 async function createZTXtChunk(keyword, text) {
     const keywordBytes = new TextEncoder().encode(keyword);
     const textBytes = new TextEncoder().encode(text);
@@ -352,7 +369,7 @@ async function createZTXtChunk(keyword, text) {
     } else {
         // Fall back to tEXt with base64 encoding
         console.warn('VectHare PNG: Using uncompressed tEXt chunk (compression unavailable)');
-        const base64 = btoa(String.fromCharCode(...textBytes));
+        const base64 = bytesToBase64(textBytes);
         const base64Bytes = new TextEncoder().encode(base64);
 
         // tEXt format: keyword + null + text
@@ -393,9 +410,17 @@ async function readTextChunk(chunk) {
         const textData = chunk.data.slice(nullIndex + 1);
         const text = new TextDecoder().decode(textData);
 
-        // Check if it's base64 encoded (our fallback format)
+        // Check if it's base64 encoded (our fallback format). atob() returns a latin-1
+        // byte string, not the original text - it must be decoded as UTF-8 bytes to
+        // round-trip non-ASCII text correctly (matches the UTF-8 encode in bytesToBase64
+        // above / createZTXtChunk).
         try {
-            const decoded = atob(text);
+            const binary = atob(text);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) {
+                bytes[i] = binary.charCodeAt(i);
+            }
+            const decoded = new TextDecoder('utf-8').decode(bytes);
             return { keyword, text: decoded };
         } catch {
             return { keyword, text };

@@ -229,6 +229,7 @@ export const CONTENT_TYPES = {
             chunkSize: 600,
             autoKeywords: true,
             scope: 'global',
+            includeDisabled: false,
         },
 
         sourceType: 'select',

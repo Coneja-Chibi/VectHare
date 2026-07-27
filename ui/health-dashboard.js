@@ -21,6 +21,20 @@ import { extension_settings } from '../../../../extensions.js';
 
 let refreshInterval = null;
 let isModalOpen = false;
+let indicatorInterval = null;
+let dashboardInitialized = false;
+
+/**
+ * Escapes HTML special characters (including quotes) for safe interpolation into markup.
+ * @param {string} text
+ * @returns {string}
+ */
+function escapeHtml(text) {
+    if (!text) return '';
+    const div = document.createElement('div');
+    div.textContent = String(text);
+    return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
 
 /**
  * Get the current backend name from settings
@@ -108,7 +122,7 @@ function renderDashboard() {
 
             <!-- Current Backend Section -->
             <div class="vecthare-health-section">
-                <h4>Current Backend: ${currentBackend}</h4>
+                <h4>Current Backend: ${escapeHtml(currentBackend)}</h4>
                 <div class="vecthare-health-grid">
                     <div class="vecthare-health-stat">
                         <span class="vecthare-stat-value">${currentMetrics.queries}</span>
@@ -173,7 +187,7 @@ function renderDashboard() {
                 <h4>Last Error</h4>
                 <div class="vecthare-health-error-box">
                     <span class="vecthare-error-time">${formatRelativeTime(currentMetrics.lastError.timestamp)}</span>
-                    <span class="vecthare-error-message">${currentMetrics.lastError.message}</span>
+                    <span class="vecthare-error-message">${escapeHtml(currentMetrics.lastError.message)}</span>
                 </div>
             </div>
             ` : ''}
@@ -202,7 +216,7 @@ function renderDashboard() {
             <div class="vecthare-health-section">
                 <h4>Active Backends</h4>
                 <div class="vecthare-active-backends">
-                    ${metrics.activeBackends.map(name => `<span class="vecthare-backend-badge">${name}</span>`).join('')}
+                    ${metrics.activeBackends.map(name => `<span class="vecthare-backend-badge">${escapeHtml(name)}</span>`).join('')}
                 </div>
             </div>
             ` : ''}
@@ -317,20 +331,33 @@ export function getHealthModalHtml() {
  * Initialize health dashboard event handlers
  */
 export function initializeHealthDashboard() {
+    // renderSettings() -> ui-manager.js currently only runs once, but nothing guarded
+    // against a second call: re-running this would stack a second un-cleared
+    // setInterval (double-firing openHealthDashboard per click, via duplicate un-
+    // namespaced $(document).on(...) binds) and orphan the first interval's handle.
+    if (dashboardInitialized) {
+        return;
+    }
+    dashboardInitialized = true;
+
     // Health indicator click
-    $(document).on('click', '#vecthare_health_indicator', openHealthDashboard);
+    $(document).on('click.vecthareHealth', '#vecthare_health_indicator', openHealthDashboard);
 
     // Close button
-    $(document).on('click', '#vecthare_health_close', closeHealthDashboard);
+    $(document).on('click.vecthareHealth', '#vecthare_health_close', closeHealthDashboard);
 
     // Overlay click
-    $(document).on('click', '#vecthare_health_modal .vecthare-modal-overlay', closeHealthDashboard);
+    $(document).on('click.vecthareHealth', '#vecthare_health_modal .vecthare-modal-overlay', closeHealthDashboard);
 
     // Refresh button
-    $(document).on('click', '#vecthare_health_refresh', updateDashboard);
+    $(document).on('click.vecthareHealth', '#vecthare_health_refresh', updateDashboard);
 
-    // Update health indicator periodically
-    setInterval(() => {
+    // Update health indicator periodically. Stored so the interval could be torn down
+    // if this module is ever re-initialized (guarded above) or unloaded.
+    if (indicatorInterval) {
+        clearInterval(indicatorInterval);
+    }
+    indicatorInterval = setInterval(() => {
         const indicator = document.getElementById('vecthare_health_indicator');
         if (indicator) {
             const metrics = getBackendMetrics();

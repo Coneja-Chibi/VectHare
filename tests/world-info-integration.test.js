@@ -39,7 +39,17 @@ vi.mock('../core/collection-ids.js', () => ({
         source: 'local',
         collectionId: key.split(':').pop() || key,
     })),
-    buildLorebookCollectionId: vi.fn((name, scope) => `lorebook_${scope}_${name}`),
+    buildLorebookCollectionId: vi.fn((name, timestamp) => `vecthare_lorebook_${name}_${timestamp || 1700000000000}`),
+    COLLECTION_PREFIXES: {
+        VECTHARE_CHAT: 'vecthare_chat_',
+        VECTHARE_LOREBOOK: 'vecthare_lorebook_',
+        VECTHARE_CHARACTER: 'vecthare_character_',
+        VECTHARE_DOCUMENT: 'vecthare_document_',
+        FILE: 'file_',
+        LOREBOOK: 'lorebook_',
+        RAGBOOKS_LOREBOOK: 'ragbooks_lorebook_',
+        CARROTKERNEL_CHAR: 'carrotkernel_char_',
+    },
 }));
 
 vi.mock('../core/constants.js', () => ({
@@ -386,27 +396,32 @@ describe('getSemanticWorldInfoEntries', () => {
 // isLorebookVectorized Tests
 // ============================================================================
 
+// NOTE: isLorebookVectorized/getLorebookVectorStats/enhanceWorldInfoEntriesUI no longer
+// call buildLorebookCollectionId() to look up an existing vectorization - that function
+// bakes a timestamp into the ID (build-time only) and cannot reconstruct the ID of an
+// already-vectorized lorebook, which was VectHare audit core-b finding #1 (world-info-
+// integration.js:202). The fix scans vecthare_collection_registry for an entry whose bare
+// collection ID starts with the `vecthare_lorebook_<sanitizedName>_` prefix instead. These
+// tests were updated to use realistic prefixed registry entries and no longer assert that
+// buildLorebookCollectionId was called by these read paths.
 describe('isLorebookVectorized', () => {
     beforeEach(() => {
         vi.clearAllMocks();
     });
 
     it('should return true when lorebook is in registry', () => {
-        buildLorebookCollectionId.mockReturnValue('lorebook_global_testbook');
         const settings = {
-            vecthare_collection_registry: ['lorebook_global_testbook', 'other_collection'],
+            vecthare_collection_registry: ['vecthare_lorebook_testbook_1700000000000', 'other_collection'],
         };
 
         const result = isLorebookVectorized('testbook', settings);
 
         expect(result).toBe(true);
-        expect(buildLorebookCollectionId).toHaveBeenCalledWith('testbook', 'global');
     });
 
     it('should return false when lorebook is not in registry', () => {
-        buildLorebookCollectionId.mockReturnValue('lorebook_global_missing');
         const settings = {
-            vecthare_collection_registry: ['lorebook_global_other'],
+            vecthare_collection_registry: ['vecthare_lorebook_other_1700000000000'],
         };
 
         const result = isLorebookVectorized('missing', settings);
@@ -415,7 +430,6 @@ describe('isLorebookVectorized', () => {
     });
 
     it('should return false when registry is empty', () => {
-        buildLorebookCollectionId.mockReturnValue('lorebook_global_test');
         const settings = {
             vecthare_collection_registry: [],
         };
@@ -426,12 +440,21 @@ describe('isLorebookVectorized', () => {
     });
 
     it('should return false when registry is undefined', () => {
-        buildLorebookCollectionId.mockReturnValue('lorebook_global_test');
         const settings = {};
 
         const result = isLorebookVectorized('test', settings);
 
         expect(result).toBe(false);
+    });
+
+    it('should not require rebuilding the ID with the original creation timestamp', () => {
+        // Regression check for core-b finding #1: the registry entry's timestamp is
+        // whatever it was created with, not something the caller can know in advance.
+        const settings = {
+            vecthare_collection_registry: ['vecthare_lorebook_testbook_1234567890123'],
+        };
+
+        expect(isLorebookVectorized('testbook', settings)).toBe(true);
     });
 });
 
@@ -445,9 +468,8 @@ describe('getLorebooksVectorizationStatus', () => {
     });
 
     it('should return Map with status for each lorebook', () => {
-        buildLorebookCollectionId.mockImplementation((name) => `lorebook_global_${name}`);
         const settings = {
-            vecthare_collection_registry: ['lorebook_global_book1', 'lorebook_global_book3'],
+            vecthare_collection_registry: ['vecthare_lorebook_book1_1700000000000', 'vecthare_lorebook_book3_1700000000000'],
         };
 
         const result = getLorebooksVectorizationStatus(['book1', 'book2', 'book3'], settings);
@@ -467,7 +489,6 @@ describe('getLorebooksVectorizationStatus', () => {
     });
 
     it('should handle all false when registry is empty', () => {
-        buildLorebookCollectionId.mockImplementation((name) => `lorebook_global_${name}`);
         const settings = { vecthare_collection_registry: [] };
 
         const result = getLorebooksVectorizationStatus(['book1', 'book2'], settings);
@@ -487,16 +508,15 @@ describe('getLorebookVectorStats', () => {
     });
 
     it('should return null when lorebook is not vectorized', async () => {
-        buildLorebookCollectionId.mockReturnValue('lorebook_global_missing');
         getCollectionMeta.mockReturnValue(null);
 
-        const result = await getLorebookVectorStats('missing', {});
+        const result = await getLorebookVectorStats('missing', { vecthare_collection_registry: [] });
 
         expect(result).toBeNull();
     });
 
     it('should return stats when lorebook is vectorized', async () => {
-        buildLorebookCollectionId.mockReturnValue('lorebook_global_test');
+        const settings = { vecthare_collection_registry: ['vecthare_lorebook_test_1700000000000'] };
         getCollectionMeta.mockReturnValue({
             sourceName: 'Test Lorebook',
             chunkCount: 42,
@@ -506,10 +526,10 @@ describe('getLorebookVectorStats', () => {
         });
         isCollectionEnabled.mockReturnValue(true);
 
-        const result = await getLorebookVectorStats('test', {});
+        const result = await getLorebookVectorStats('test', settings);
 
         expect(result).toEqual({
-            collectionId: 'lorebook_global_test',
+            collectionId: 'vecthare_lorebook_test_1700000000000',
             sourceName: 'Test Lorebook',
             chunkCount: 42,
             createdAt: '2024-01-01',
@@ -520,13 +540,13 @@ describe('getLorebookVectorStats', () => {
     });
 
     it('should use default values for missing fields', async () => {
-        buildLorebookCollectionId.mockReturnValue('lorebook_global_test');
+        const settings = { vecthare_collection_registry: ['vecthare_lorebook_test_1700000000000'] };
         getCollectionMeta.mockReturnValue({
             sourceName: 'Test',
         });
         isCollectionEnabled.mockReturnValue(false);
 
-        const result = await getLorebookVectorStats('test', {});
+        const result = await getLorebookVectorStats('test', settings);
 
         expect(result.chunkCount).toBe(0);
         expect(result.strategy).toBe('per_entry');
@@ -545,7 +565,6 @@ describe('enhanceWorldInfoEntriesUI', () => {
     });
 
     it('should return entries unchanged when lorebook is not vectorized', () => {
-        buildLorebookCollectionId.mockReturnValue('lorebook_global_test');
         const settings = { vecthare_collection_registry: [] };
         const entries = [
             { uid: 1, content: 'Entry 1' },
@@ -559,8 +578,7 @@ describe('enhanceWorldInfoEntriesUI', () => {
     });
 
     it('should add vector status when lorebook is vectorized', () => {
-        buildLorebookCollectionId.mockReturnValue('lorebook_global_test');
-        const settings = { vecthare_collection_registry: ['lorebook_global_test'] };
+        const settings = { vecthare_collection_registry: ['vecthare_lorebook_test_1700000000000'] };
         const entries = [
             { uid: 1, content: 'Entry 1' },
             { uid: 2, content: 'Entry 2' },
@@ -578,8 +596,7 @@ describe('enhanceWorldInfoEntriesUI', () => {
     });
 
     it('should preserve original entry properties', () => {
-        buildLorebookCollectionId.mockReturnValue('lorebook_global_test');
-        const settings = { vecthare_collection_registry: ['lorebook_global_test'] };
+        const settings = { vecthare_collection_registry: ['vecthare_lorebook_test_1700000000000'] };
         const entries = [
             { uid: 1, content: 'Entry 1', customField: 'custom' },
         ];
@@ -592,8 +609,7 @@ describe('enhanceWorldInfoEntriesUI', () => {
     });
 
     it('should handle empty entries array', () => {
-        buildLorebookCollectionId.mockReturnValue('lorebook_global_test');
-        const settings = { vecthare_collection_registry: ['lorebook_global_test'] };
+        const settings = { vecthare_collection_registry: ['vecthare_lorebook_test_1700000000000'] };
 
         const result = enhanceWorldInfoEntriesUI('test', [], settings);
 

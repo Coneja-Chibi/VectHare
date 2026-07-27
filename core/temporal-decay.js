@@ -7,7 +7,7 @@
 // =============================================================================
 
 import { isChunkTemporallyBlind } from './collection-metadata.js';
-import { DEFAULT_DECAY_HALF_LIFE, DEFAULT_DECAY_FLOOR, DEFAULT_NOSTALGIA_MAX_BOOST } from './constants.js';
+import { DEFAULT_DECAY_HALF_LIFE, DEFAULT_DECAY_FLOOR, DEFAULT_NOSTALGIA_MAX_BOOST, DEFAULT_NOSTALGIA_HALF_LIFE } from './constants.js';
 
 /**
  * Calculates exponential decay multiplier
@@ -71,15 +71,16 @@ export function applyTemporalDecay(score, messageAge, decaySettings) {
     let decayMultiplier = 1.0;
 
     if (decaySettings.mode === 'exponential') {
-        const halfLife = decaySettings.halfLife || 50;
+        const halfLife = decaySettings.halfLife ?? DEFAULT_DECAY_HALF_LIFE;
         decayMultiplier = calculateExponentialDecay(messageAge, halfLife);
     } else if (decaySettings.mode === 'linear') {
-        const rate = decaySettings.linearRate || 0.01;
+        const rate = decaySettings.linearRate ?? 0.01;
         decayMultiplier = calculateLinearDecay(messageAge, rate);
     }
 
-    // Enforce minimum relevance
-    const minRelevance = decaySettings.minRelevance || 0.3;
+    // Enforce minimum relevance. `??` (not `||`) so an explicit floor of 0 - "let old
+    // chunks decay all the way to nothing" - isn't silently replaced with the default.
+    const minRelevance = decaySettings.minRelevance ?? DEFAULT_DECAY_FLOOR;
     decayMultiplier = Math.max(decayMultiplier, minRelevance);
 
     return score * decayMultiplier;
@@ -232,7 +233,10 @@ function getSceneContext(messageId, scenes) {
 
     return {
         isInScene: !!scene,
-        sceneStart: scene?.start || null
+        // `scene ? scene.start : null` (not `scene?.start || null`) so a legitimate scene
+        // starting at message index 0 isn't converted to null, which broke scene-identity
+        // comparisons and the age-reset arithmetic for the very first scene in a chat.
+        sceneStart: scene ? scene.start : null
     };
 }
 

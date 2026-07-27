@@ -324,6 +324,29 @@ const STRATEGIES = {
     },
 
     /**
+     * Per Page - each wiki page becomes one chunk. prepareWikiContent() already produces
+     * one {text, metadata:{pageTitle}} entry per page, so this strategy just passes each
+     * page through unchanged. Without this entry, chunkText() fell back to `adaptive`,
+     * which routed array input to `per_message` and overwrote pageTitle with chat-speaker
+     * metadata instead.
+     */
+    per_page: (pages, options) => {
+        if (!Array.isArray(pages)) {
+            const text = typeof pages === 'string' ? pages : (pages.text || String(pages));
+            return [text];
+        }
+        return pages.map(p => {
+            if (typeof p === 'string') {
+                return { text: p, metadata: {} };
+            }
+            return {
+                text: p.text || '',
+                metadata: { ...(p.metadata || {}) },
+            };
+        });
+    },
+
+    /**
      * Combined - merge all content then chunk with adaptive
      */
     combined: (content, options) => {

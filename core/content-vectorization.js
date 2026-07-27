@@ -56,7 +56,14 @@ export async function vectorizeContent({ contentType, source, settings }) {
         // Step 2: Prepare and chunk
         progressTracker.updateProgress(2, 'Chunking content...');
         const preparedContent = await prepareContent(contentType, rawContent, settings);
-        const chunks = await chunkText(preparedContent.text || preparedContent, {
+        // `?? ` (not `||`) so a legitimately empty string doesn't fall through to passing
+        // the whole wrapper object into chunkText - that gets stringified into a single
+        // "[object Object]" chunk instead of being caught as "nothing to vectorize".
+        const resolvedText = preparedContent?.text ?? preparedContent;
+        if (typeof resolvedText === 'string' && resolvedText.trim().length === 0) {
+            throw new Error('No content to vectorize');
+        }
+        const chunks = await chunkText(resolvedText, {
             strategy: settings.strategy || type.defaultStrategy,
             chunkSize: settings.chunkSize || type.defaults.chunkSize,
             chunkOverlap: settings.chunkOverlap || type.defaults.chunkOverlap,
@@ -373,9 +380,12 @@ function prepareLorebookContent(rawContent, settings) {
         return { text: '', type: 'empty' };
     }
 
-    // Filter to entries that have content, and apply text cleaning
+    // Filter to entries that have content, and apply text cleaning.
+    // World Info entries carry `disable: boolean` (true = disabled in WI) - respect the
+    // "Include Disabled Entries" setting instead of always vectorizing every entry.
     const validEntries = entries
         .filter(e => e && e.content)
+        .filter(e => settings.includeDisabled || !e.disable)
         .map(e => ({ ...e, content: cleanText(e.content) }));
 
     if (settings.strategy === 'per_entry') {
@@ -748,9 +758,10 @@ function enrichChunks(chunks, contentType, source, settings, preparedContent, ve
         }
 
         // Add speaker name as keyword for chat messages
-        if (contentType === 'chat' && chunk.metadata?.speakerName) {
+        // (chunking.js writes this field as `speaker`, not `speakerName`)
+        if (contentType === 'chat' && chunk.metadata?.speaker) {
             keywords.push({
-                text: chunk.metadata.speakerName.toLowerCase(),
+                text: chunk.metadata.speaker.toLowerCase(),
                 weight: keywordBaseWeight,
             });
         }

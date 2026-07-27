@@ -92,6 +92,8 @@ export function checkChunkSize(settings) {
             name: 'Chunk Size',
             status: 'fail',
             message: `Chunk size too small (${size} chars). Minimum: 50`,
+            // #vecthare_chunk_size now exists in the Core Settings card (VectHare audit
+            // ui-a finding #7), so this auto-fix has a real control to drive.
             fixable: true,
             fixAction: 'fix_chunk_size'
         };

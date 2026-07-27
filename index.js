@@ -140,9 +140,14 @@ const defaultSettings = {
     world_info_threshold: 0.3,          // Score threshold for WI activation
     world_info_top_k: 3,                // Max entries to activate per lorebook
     world_info_query_depth: 3,          // Recent messages to use for query
+    world_info_enabled_for_all: false,  // Bypass dedup so semantic WI also matches keyword-active entries
+    world_info_max_entries: 10,         // Cap on total semantic WI entries returned for injection
 
     // Keyword Extraction
     custom_stopwords: '',               // Custom stopwords (comma-separated)
+
+    // Diagnostics
+    include_production_tests: false,    // Default for the diagnostics modal's production-tests checkbox
 };
 
 // Runtime settings (merged with saved settings)

@@ -107,12 +107,15 @@ export function clearClassifierCache() {
 }
 
 /**
- * Classify emotion using local transformers.js classifier
- * This uses ST's built-in /api/extra/classify endpoint
+ * Classify emotion using ST's built-in /api/extra/classify endpoint (whatever
+ * text-classification pipeline the server is configured with - see NOTE below).
  *
  * @param {string} text - Text to classify
- * @param {Object} options - Options
- * @param {string} [options.model] - Model to use (default from settings)
+ * @param {Object} [options] - Reserved for future options (accepted for external API
+ *   compatibility - e.g. Cotton-Tales calls this via CottonTalesAPI). No model-selection
+ *   option is defined: SillyTavern's /api/extra/classify endpoint ignores any requested
+ *   model and always uses the server's configured pipeline, so previously accepting an
+ *   `options.model` here implied a selection that never actually took effect.
  * @returns {Promise<{label: string, score: number}|null>} Classification result
  */
 export async function classifyEmotion(text, options = {}) {
@@ -126,20 +129,23 @@ export async function classifyEmotion(text, options = {}) {
         return null;
     }
 
-    // Check cache
-    const cacheKey = `${text.substring(0, 100)}:${settings.model}`;
+    // Cache by text alone - the server's response doesn't depend on any client-supplied
+    // model (see NOTE below), so there is nothing else to key on.
+    const cacheKey = text.substring(0, 100);
     if (classifierCache.has(cacheKey)) {
         return classifierCache.get(cacheKey);
     }
 
     try {
-        // Use ST's local classify endpoint
+        // Use ST's local classify endpoint.
+        // NOTE: SillyTavern's /api/extra/classify handler only reads `text` from the
+        // request body - it always classifies with the server's configured
+        // text-classification pipeline. There is no `model` field to send.
         const response = await fetch('/api/extra/classify', {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({
                 text: text,
-                model: options.model || settings.model,
             }),
         });
 
@@ -178,11 +184,18 @@ export async function classifyEmotion(text, options = {}) {
 }
 
 /**
- * Test if a model produces emotion-like labels
- * @param {string} model - Model ID to test
- * @returns {Promise<{isEmotionClassifier: boolean, sampleLabels: string[], confidence: string}>}
+ * Test whether the SillyTavern server's active text-classification pipeline produces
+ * emotion-like labels.
+ *
+ * IMPORTANT: SillyTavern's /api/extra/classify endpoint ignores any requested model and
+ * always classifies with whatever pipeline the server is configured with - there is no
+ * way to select or test a specific model from the client. This tests the server's actual
+ * classifier, whatever it is. The returned `modelHonored: false` flag reflects this;
+ * callers must not present the result as evidence about any particular model.
+ *
+ * @returns {Promise<{isEmotionClassifier: boolean, sampleLabels: string[], confidence: string, modelHonored: boolean}>}
  */
-export async function testClassifierModel(model) {
+export async function testClassifierModel() {
     const testTexts = [
         { text: 'I am so happy and excited!', expected: ['joy', 'excitement', 'happiness', 'love'] },
         { text: 'This makes me really angry and frustrated.', expected: ['anger', 'annoyance', 'frustration', 'disgust'] },
@@ -199,7 +212,6 @@ export async function testClassifierModel(model) {
                 headers: getRequestHeaders(),
                 body: JSON.stringify({
                     text: test.text,
-                    model: model,
                 }),
             });
 
@@ -258,6 +270,9 @@ export async function testClassifierModel(model) {
         sampleLabels: labelsArray,
         confidence: confidence,
         matchRate: matchRate,
+        // The server ignores the requested `model` (see function doc above) - this result
+        // describes whatever classifier the server is actually running, not `model`.
+        modelHonored: false,
     };
 }
 

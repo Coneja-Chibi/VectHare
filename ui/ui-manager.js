@@ -415,6 +415,12 @@ export function renderSettings(containerId, settings, callbacks) {
                             <input type="range" id="vecthare_insert_batch_size" class="vecthare-slider" min="10" max="100" step="10" />
                             <small class="vecthare_hint">Chunks per insert batch (50-100 recommended for faster bulk operations)</small>
 
+                            <label for="vecthare_chunk_size" style="margin-top: 16px;">
+                                <small>Chunk Size (characters)</small>
+                            </label>
+                            <input type="number" id="vecthare_chunk_size" class="vecthare-input" min="50" max="4000" step="50" placeholder="500" />
+                            <small class="vecthare_hint">Target chunk length for adaptive-strategy chunking (200-800 recommended)</small>
+
                             <label for="vecthare_min_chat_length" style="margin-top: 16px;">
                                 <small>Minimum Messages Before Injection</small>
                             </label>
@@ -546,6 +552,70 @@ export function renderSettings(containerId, settings, callbacks) {
                                 <small class="vecthare_hint">Messages from end of chat to insert at</small>
                             </div>
 
+                        </div>
+                    </div>
+
+                    <!-- Cotton-Tales Emotion Classifier Integration Card -->
+                    <!-- Hidden unless Cotton-Tales is detected (see initializeCottonTalesIntegration()).
+                         This markup previously only existed in the unloaded ui/settings.html, so every
+                         element the JS below binds against matched zero elements (VectHare audit ui-a
+                         finding #3). The classifier-model dropdown from that file is intentionally NOT
+                         reproduced here: SillyTavern's /api/extra/classify endpoint ignores any requested
+                         model and always runs the server's configured pipeline, so a model picker would
+                         just be misleading UI (VectHare audit core-b finding #5 / ui-a item 5 follow-through). -->
+                    <div class="vecthare-card" id="vecthare_cottontales_section" style="display: none;">
+                        <div class="vecthare-card-header">
+                            <h3 class="vecthare-card-title">
+                                <span class="vecthare-icon">
+                                    <i class="fa-solid fa-masks-theater"></i>
+                                </span>
+                                Cotton-Tales Integration
+                            </h3>
+                            <p class="vecthare-card-subtitle">Configure how VectHare provides emotion classification to Cotton-Tales</p>
+                        </div>
+                        <div class="vecthare-card-body">
+                            <label for="vecthare_emotion_method">
+                                <small>Classification Method</small>
+                            </label>
+                            <select id="vecthare_emotion_method" class="vecthare-select">
+                                <option value="disabled">Disabled</option>
+                                <option value="classifier">Dedicated Classifier Model</option>
+                                <option value="similarity">Embedding Similarity (uses your embedding model)</option>
+                            </select>
+
+                            <!-- Dedicated Classifier Settings -->
+                            <div id="vecthare_classifier_settings" style="display: none; margin-top: 10px;">
+                                <small class="vecthare_hint" style="display:block;">
+                                    <i class="fa-solid fa-info-circle"></i>
+                                    The classification model is determined by the SillyTavern server's
+                                    configured text-classification pipeline - VectHare cannot select a
+                                    specific model. "Test Classifier" checks whatever model the server is
+                                    actually running.
+                                </small>
+
+                                <div style="margin-top:8px;">
+                                    <button id="vecthare_test_classifier" class="vecthare-btn-secondary" title="Test whether the server's active classifier outputs emotion-like labels">
+                                        <i class="fa-solid fa-flask"></i> Test Classifier
+                                    </button>
+                                </div>
+
+                                <div id="vecthare_classifier_test_result" style="display: none; margin-top:8px; padding: 8px; border-radius: 4px;">
+                                    <!-- Test results shown here -->
+                                </div>
+                            </div>
+
+                            <!-- Embedding Similarity Settings -->
+                            <div id="vecthare_similarity_settings" style="display: none; margin-top: 10px;">
+                                <small class="vecthare_hint" style="display:block;">
+                                    <i class="fa-solid fa-info-circle"></i>
+                                    Compares message text against emotion descriptions using your configured
+                                    embedding model. The emotion with the highest cosine similarity score is
+                                    selected.
+                                </small>
+                                <small class="vecthare_hint" style="display:block; margin-top:5px;">
+                                    Currently using: <b id="vecthare_similarity_source_display">transformers</b>
+                                </small>
+                            </div>
                         </div>
                     </div>
 
@@ -2120,6 +2190,27 @@ function bindSettingsEvents(settings, callbacks) {
             saveSettingsDebounced();
         });
 
+    // "Enabled for all entries" and "Max Entries" were previously rendered but never read
+    // or written anywhere (VectHare audit ui-a finding #6) - wire them the same way as the
+    // other World Info inputs above, and consume them in core/world-info-integration.js.
+    $('#vecthare_enabled_for_all')
+        .prop('checked', settings.world_info_enabled_for_all || false)
+        .on('change', function() {
+            settings.world_info_enabled_for_all = $(this).prop('checked');
+            applySettingsSnapshot(settings);
+            saveSettingsDebounced();
+        });
+
+    $('#vecthare_max_entries')
+        .val(settings.world_info_max_entries ?? 10)
+        .on('input', function() {
+            const value = parseInt($(this).val());
+            const safeValue = isNaN(value) ? 10 : Math.max(1, Math.min(9999, value));
+            settings.world_info_max_entries = safeValue;
+            applySettingsSnapshot(settings);
+            saveSettingsDebounced();
+        });
+
     // Custom stopwords
     $('#vecthare_custom_stopwords')
         .val(settings.custom_stopwords || '')
@@ -2660,6 +2751,17 @@ function bindSettingsEvents(settings, callbacks) {
     $('#vecthare_vectorize_all').on('click', callbacks.onVectorizeAll);
     $('#vecthare_purge').on('click', callbacks.onPurge);
     $('#vecthare_run_diagnostics').on('click', callbacks.onRunDiagnostics);
+
+    // Was previously rendered but never read/written anywhere (VectHare audit ui-a
+    // finding #8) - openDiagnosticsModal() now defaults the modal's own production-tests
+    // checkbox from this value.
+    $('#vecthare_include_production_tests')
+        .prop('checked', settings.include_production_tests || false)
+        .on('change', function() {
+            settings.include_production_tests = $(this).prop('checked');
+            applySettingsSnapshot(settings);
+            saveSettingsDebounced();
+        });
     $('#vecthare_database_browser').on('click', () => {
         openDatabaseBrowser();
     });
@@ -2757,42 +2859,12 @@ async function initializeCottonTalesIntegration(settings) {
     // Initialize UI for current method
     updateMethodUI(getCurrentMethod());
 
-    // Classifier model selection
-    $('#vecthare_emotion_classifier_model')
-        .val(settings.emotion_classifier_model || 'SamLowe/roberta-base-go_emotions')
-        .on('change', function() {
-            const value = $(this).val();
+    // NOTE: no classifier-model dropdown is bound here. SillyTavern's /api/extra/classify
+    // endpoint ignores any requested model and always runs the server's configured
+    // text-classification pipeline, so a per-model selector would silently do nothing -
+    // see the informational note in the markup instead (VectHare audit core-b finding #5).
 
-            if (value === 'custom') {
-                $('#vecthare_custom_classifier_model').show();
-            } else {
-                $('#vecthare_custom_classifier_model').hide();
-                settings.emotion_classifier_model = value;
-                applySettingsSnapshot(settings);
-                saveSettingsDebounced();
-                emotionClassifier.updateClassifierSetting('model', value);
-            }
-        });
-
-    // Show custom model input if currently set to custom
-    if (settings.emotion_classifier_model &&
-        !['SamLowe/roberta-base-go_emotions', 'j-hartmann/emotion-english-distilroberta-base', 'bhadresh-savani/distilbert-base-uncased-emotion'].includes(settings.emotion_classifier_model)) {
-        $('#vecthare_emotion_classifier_model').val('custom');
-        $('#vecthare_custom_classifier_model').show();
-    }
-
-    // Custom model input
-    $('#vecthare_emotion_classifier_custom')
-        .val(settings.emotion_classifier_custom || '')
-        .on('input', function() {
-            settings.emotion_classifier_custom = $(this).val();
-            settings.emotion_classifier_model = $(this).val();
-            applySettingsSnapshot(settings);
-            saveSettingsDebounced();
-            emotionClassifier.updateClassifierSetting('model', $(this).val());
-        });
-
-    // Test classifier button
+    // Test classifier button - tests whatever model the server is actually running.
     $('#vecthare_test_classifier').on('click', async function() {
         const $btn = $(this);
         const $result = $('#vecthare_classifier_test_result');
@@ -2801,8 +2873,7 @@ async function initializeCottonTalesIntegration(settings) {
         $result.hide();
 
         try {
-            const model = settings.emotion_classifier_model || 'SamLowe/roberta-base-go_emotions';
-            const testResult = await emotionClassifier.testClassifierModel(model);
+            const testResult = await emotionClassifier.testClassifierModel();
 
             $result.show();
 
@@ -2824,6 +2895,12 @@ async function initializeCottonTalesIntegration(settings) {
                         <b>Confidence:</b> <span style="color: ${confidenceColor}">${testResult.confidence}</span><br>
                         <b>Sample labels:</b> ${testResult.sampleLabels.join(', ')}
                     </div>
+                    ${!testResult.modelHonored ? `
+                    <div style="margin-top: 4px; font-size: 0.85em; opacity: 0.85;">
+                        <i class="fa-solid fa-info-circle"></i>
+                        This reflects whichever text-classification model the SillyTavern server
+                        is actually configured to run - VectHare cannot select a specific model.
+                    </div>` : ''}
                 `);
             } else {
                 $result.css('background', 'rgba(234,179,8,0.2)').html(`
@@ -2832,9 +2909,15 @@ async function initializeCottonTalesIntegration(settings) {
                         <b>May not be an emotion classifier</b>
                     </div>
                     <div style="margin-top: 4px; font-size: 0.9em;">
-                        Labels don't look like emotions: ${testResult.sampleLabels.join(', ')}<br>
-                        Consider using a different model.
+                        Labels don't look like emotions: ${testResult.sampleLabels.join(', ')}
                     </div>
+                    ${!testResult.modelHonored ? `
+                    <div style="margin-top: 4px; font-size: 0.85em; opacity: 0.85;">
+                        <i class="fa-solid fa-info-circle"></i>
+                        This reflects whichever text-classification model the SillyTavern server
+                        is actually configured to run - VectHare cannot select a specific model.
+                        Change the server's classification model to get different results.
+                    </div>` : ''}
                 `);
             }
         } catch (error) {
@@ -3253,6 +3336,11 @@ ${categoryNames[category] || category.toUpperCase()}  ${catStats}
 export function openDiagnosticsModal() {
     showDiagnosticsPhase('selection');
     $('#vecthare_diagnostics_title').text('Run Diagnostics');
+    // Default the modal's production-tests checkbox from the settings panel's
+    // "Include Production Tests" checkbox (VectHare audit ui-a finding #8 - that setting
+    // was previously rendered but never read anywhere, silently ignored whenever the user
+    // checked it and then ran diagnostics without also re-checking the modal's own box).
+    $('#vecthare_diag_production').prop('checked', !!extension_settings.vecthare?.include_production_tests);
     $('#vecthare_diagnostics_modal').fadeIn(200);
 }
 
@@ -3358,6 +3446,8 @@ function handleDiagnosticFix(action, silent = false) {
             break;
 
         case 'fix_chunk_size':
+            // #vecthare_chunk_size now exists in the Core Settings card; handler bound
+            // with .on('input', ...) at ~line 1712.
             $('#vecthare_chunk_size').val(500).trigger('input');
             if (!silent) toastr.success('Chunk size reset to 500');
             break;

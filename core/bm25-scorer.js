@@ -563,8 +563,11 @@ export function applyBM25Scoring(results, query, options = {}) {
         const bm25Score = scorer.scoreDocument(queryTokens, idx);
         const normalizedBM25 = maxBM25Score > 0 ? bm25Score / maxBM25Score : 0;
 
-        // Normalize vector score to [0, 1] range (assuming it's already in [0, 1])
-        const normalizedVector = result.originalScore ?? result.score;
+        // Normalize vector score to [0, 1] range (assuming it's already in [0, 1]).
+        // Use the current score, not originalScore: when this runs after applyKeywordBoosts
+        // (hybrid keyword_scoring_method), originalScore holds the pre-boost score, so
+        // reading it here silently discards the keyword boost that was just applied.
+        const normalizedVector = result.score ?? result.originalScore;
 
         // Combined score: weighted sum of vector and BM25 scores
         const combinedScore = alpha * normalizedVector + beta * normalizedBM25;

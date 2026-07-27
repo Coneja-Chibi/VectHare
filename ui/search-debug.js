@@ -189,7 +189,10 @@ export function openSearchDebugModal() {
     // Remove existing modal
     $('#vecthare_search_debug_modal').remove();
 
-    const html = createModalHtml(lastDebugData);
+    // Always (re)open on the true most-recent query, not whatever history tab was last
+    // viewed - the history-tab click handler below no longer mutates lastDebugData.
+    currentHistoryIndex = 0;
+    const html = createModalHtml(lastDebugData, currentHistoryIndex);
     $('body').append(html);
 
     bindEvents();
@@ -460,7 +463,7 @@ function renderStageChunks(chunks, stageName, data) {
 
         // Show matched query keywords badge
         const keywordMatchInfo = chunk.matchedQueryKeywords && chunk.matchedQueryKeywords.length > 0
-            ? `<span class="vecthare-debug-keyword-match-badge" title="Matched query keywords: ${chunk.matchedQueryKeywords.join(', ')}">
+            ? `<span class="vecthare-debug-keyword-match-badge" title="Matched query keywords: ${escapeHtml(chunk.matchedQueryKeywords.join(', '))}">
                    🔑 ${chunk.matchedQueryKeywords.length} keyword${chunk.matchedQueryKeywords.length > 1 ? 's' : ''}
                </span>`
             : '';
@@ -566,12 +569,12 @@ function renderStageChunks(chunks, stageName, data) {
                             ${chunk.metadata?.keywords?.length ? `
                             <div class="vecthare-debug-meta-item">
                                 <span class="meta-label">Keywords</span>
-                                <span class="meta-value">${chunk.metadata.keywords.map(k => typeof k === 'object' ? `${k.text}(${k.weight}x)` : k).join(', ')}</span>
+                                <span class="meta-value">${escapeHtml(chunk.metadata.keywords.map(k => typeof k === 'object' ? `${k.text}(${k.weight}x)` : k).join(', '))}</span>
                             </div>` : ''}
                             ${chunk.matchedQueryKeywords?.length ? `
                             <div class="vecthare-debug-meta-item">
                                 <span class="meta-label">Matched Query Keywords</span>
-                                <span class="meta-value vecthare-matched-keywords">${chunk.matchedQueryKeywords.join(', ')}</span>
+                                <span class="meta-value vecthare-matched-keywords">${escapeHtml(chunk.matchedQueryKeywords.join(', '))}</span>
                             </div>` : ''}
                             ${chunk.vectorRank !== undefined ? `
                             <div class="vecthare-debug-meta-item">
@@ -755,7 +758,7 @@ function buildScoreBreakdown(chunk) {
             boostTitle = `Matched: ${chunk.matchedKeywords.join(', ')}`;
         }
         mathParts.push(`<span class="vecthare-score-operator">×</span>`);
-        mathParts.push(`<span class="vecthare-score-boost" title="${boostTitle}">${keywordBoost.toFixed(2)}x</span>`);
+        mathParts.push(`<span class="vecthare-score-boost" title="${escapeHtml(boostTitle)}">${keywordBoost.toFixed(2)}x</span>`);
     }
 
     if (hasDecay) {
@@ -1000,20 +1003,22 @@ function diagnosePipeline(data) {
         });
 
         if (afterDecayCount === 0 && aboveThreshold.length > 0) {
-            // All chunks killed by decay - analyze the decay impact
-            const decayedChunks = aboveThreshold.map(chunk => {
-                const afterDecayChunk = data.stages.initial.find(c => c.hash === chunk.hash);
-                return {
-                    ...chunk,
-                    originalScore: chunk.originalScore || chunk.score,
-                    finalScore: afterDecayChunk?.score || 0,
-                    age: chunk.messageAge || 'unknown'
-                };
-            });
+            // All chunks killed by decay - data.stages.afterDecay is guaranteed empty in
+            // this branch (that's the branch condition), so there is no post-decay score
+            // to look up for any chunk. Report the pre-decay score explicitly labeled as
+            // such, rather than silently reading the undecayed stages.initial score and
+            // presenting it as if it were what "survived" decay.
+            const decayedChunks = aboveThreshold.map(chunk => ({
+                ...chunk,
+                originalScore: chunk.originalScore || chunk.score,
+                age: chunk.messageAge || 'unknown'
+            }));
 
-            // Find the chunk that was closest to surviving
+            // Find the chunk with the highest pre-decay score (this doesn't tell us how
+            // close it came to surviving decay - per-chunk post-decay scores aren't
+            // available once none survive).
             const bestSurvivor = decayedChunks.reduce((best, chunk) => {
-                return (chunk.finalScore || 0) > (best.finalScore || 0) ? chunk : best;
+                return (chunk.originalScore || 0) > (best.originalScore || 0) ? chunk : best;
             });
 
             const decayStrength = temporalDecay.strength || temporalDecay.rate || 'unknown';
@@ -1021,7 +1026,7 @@ function diagnosePipeline(data) {
 
             diagnosis.push({
                 label: 'Temporal Decay',
-                detail: `All ${aboveThreshold.length} chunks fell below threshold after decay. Best surviving score was ${bestSurvivor.finalScore?.toFixed(3) || 'N/A'} (age: ${bestSurvivor.age} messages).`,
+                detail: `All ${aboveThreshold.length} chunks fell below threshold after decay (0 survived). Highest pre-decay score was ${bestSurvivor.originalScore?.toFixed(3) || 'N/A'} (age: ${bestSurvivor.age} messages) - post-decay scores aren't available when nothing survives.`,
                 fix: `Your decay settings (strength: ${decayStrength}, half-life: ${halfLife}) are too aggressive. Either disable temporal decay, or increase half-life to preserve older messages longer.`,
                 isCause: true,
                 isOk: false
@@ -1309,7 +1314,11 @@ function escapeHtml(text) {
     if (!text) return '';
     const div = document.createElement('div');
     div.textContent = text;
-    return div.innerHTML;
+    // The textContent -> innerHTML round-trip only escapes &, <, > - it leaves " and '
+    // untouched, which is unsafe for values interpolated into HTML attributes (e.g.
+    // title="...") since a payload like `" onerror=alert(1) x="` closes the attribute
+    // early and injects arbitrary markup.
+    return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 // ============================================================================
@@ -1542,13 +1551,16 @@ ${'='.repeat(50)}`;
  * Copies diagnostic dump to clipboard
  */
 async function copyDiagnosticDump() {
-    if (!lastDebugData) {
+    // Dump whichever entry is currently displayed (the selected history tab), not
+    // necessarily the true most-recent query - matches what's on screen.
+    const viewedData = queryHistory[currentHistoryIndex] || lastDebugData;
+    if (!viewedData) {
         toastr.warning('No debug data available');
         return;
     }
 
     try {
-        const dump = generateDiagnosticDump(lastDebugData);
+        const dump = generateDiagnosticDump(viewedData);
         await navigator.clipboard.writeText(dump);
         toastr.success('Diagnostic dump copied to clipboard');
     } catch (err) {
@@ -1583,14 +1595,19 @@ function bindEvents() {
         }
     });
 
-    // History tabs - switch between past queries
+    // History tabs - switch between past queries. Only tracks which entry is currently
+    // being *viewed* via currentHistoryIndex - it must not reassign the module-level
+    // lastDebugData, which is meant to always be the true most-recent query (set by
+    // setLastSearchDebug()). Reassigning it here previously meant that closing and
+    // reopening the modal - or copying the diagnostic dump - kept showing/exporting
+    // whatever historical query was last clicked, not the actual last search, until a
+    // new RAG query overwrote it.
     $('.vecthare-debug-history-tab').on('click', function() {
         const historyIndex = parseInt($(this).data('history-index'));
         if (queryHistory[historyIndex]) {
             currentHistoryIndex = historyIndex;
-            lastDebugData = queryHistory[historyIndex];
             // Refresh the modal content
-            const newHtml = createModalHtml(lastDebugData, historyIndex);
+            const newHtml = createModalHtml(queryHistory[historyIndex], historyIndex);
             $('#vecthare_search_debug_modal').replaceWith(newHtml);
             $('#vecthare_search_debug_modal').show();
             bindEvents();

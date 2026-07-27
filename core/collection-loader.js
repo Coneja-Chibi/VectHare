@@ -517,17 +517,30 @@ async function discoverViaFallback(settings) {
         const parsed = parseRegistryKey(registryKey);
         const collectionId = parsed.collectionId;
 
-        const result = await probeCollection(collectionId, settings);
+        // Probe using the backend/source recorded in the registry key itself, not
+        // whatever the user currently has configured. Probing a transformers-era
+        // collection with the currently-configured settings.source = 'openai'
+        // resolves to a different (empty) index and would otherwise look "stale".
+        const probeSettings = (parsed.backend || parsed.source)
+            ? { ...settings, vector_backend: parsed.backend || settings.vector_backend, source: parsed.source || settings.source }
+            : settings;
+
+        const result = await probeCollection(collectionId, probeSettings);
         if (result.exists) {
             validRegistryEntries.push(registryKey);
             if (!discovered.includes(registryKey)) {
                 discovered.push(registryKey);
             }
             console.log(`VectHare: Verified registry entry: ${collectionId} (${result.count} chunks)`);
-        } else {
-            // Remove stale entry
+        } else if (parsed.backend && parsed.source) {
+            // Only unregister when we probed with the collection's own recorded
+            // backend/source. An empty result under an unknown/legacy key format is
+            // ambiguous - it could be a mismatched-source false negative - so leave it.
             unregisterCollection(registryKey);
             console.log(`VectHare: Removed stale registry entry: ${registryKey}`);
+        } else {
+            validRegistryEntries.push(registryKey);
+            console.log(`VectHare: Could not verify legacy registry entry (unknown backend/source), keeping: ${registryKey}`);
         }
     }
 

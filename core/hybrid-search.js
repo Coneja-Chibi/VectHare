@@ -13,7 +13,7 @@
  */
 
 import { getBackend } from '../backends/backend-manager.js';
-import { createBM25Scorer } from './bm25-scorer.js';
+import { createBM25Scorer, tokenize } from './bm25-scorer.js';
 
 /** Default RRF constant (prevents division by zero, balances contribution) */
 export const DEFAULT_RRF_K = 60;
@@ -403,12 +403,12 @@ function performBM25Search(results, query, options = {}) {
         return results;
     }
 
-    // Get BM25 scores for all results
+    // Get BM25 scores for all results. Must use the same tokenize() (stemming +
+    // stopword removal) that createBM25Scorer used to build the index below, or query
+    // terms systematically fail to match the stemmed index terms and every score is 0.
+    const queryTokens = tokenize(query);
     const scoredResults = results.map((result, idx) => {
-        const bm25Score = scorer.scoreDocument(
-            query.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(t => t.length > 0),
-            idx
-        );
+        const bm25Score = scorer.scoreDocument(queryTokens, idx);
         return {
             ...result,
             bm25Score

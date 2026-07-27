@@ -872,9 +872,12 @@ export async function queryCollection(collectionId, searchText, topK, settings) 
         throw error;
     }
 
-    // Convert to format expected by keyword boost
-    const resultsForBoost = rawResults.metadata.map((meta, idx) => ({
-        hash: rawResults.hashes[idx],
+    // Convert to format expected by keyword boost.
+    // ST's /api/vector/query threshold-filters `metadata` but returns `hashes` unfiltered,
+    // so metadata[idx] and hashes[idx] are not guaranteed to be the same item once any
+    // result scored below threshold - use the hash embedded in each metadata object instead.
+    const resultsForBoost = rawResults.metadata.map((meta) => ({
+        hash: meta.hash,
         score: meta.score || 0,
         metadata: meta,
         text: meta.text || ''
@@ -1016,9 +1019,11 @@ export async function queryMultipleCollections(collectionIds, searchText, topK, 
             continue;
         }
 
-        // Convert to format expected by scoring functions
-        const resultsForBoost = collectionResults.metadata.map((meta, idx) => ({
-            hash: collectionResults.hashes[idx],
+        // Convert to format expected by scoring functions.
+        // Same threshold-filtering mismatch as queryCollection() above - use meta.hash,
+        // not the unfiltered hashes[idx], to keep hash/metadata pairs aligned.
+        const resultsForBoost = collectionResults.metadata.map((meta) => ({
+            hash: meta.hash,
             score: meta.score || 0,
             metadata: meta,
             text: meta.text || ''

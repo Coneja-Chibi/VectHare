@@ -212,12 +212,14 @@ function evaluatePatternCondition(rule, context) {
     // Get messages to search based on scan depth and role filter
     let messagesToSearch = context.recentMessages || [];
 
-    // Apply scan depth
-    messagesToSearch = messagesToSearch.slice(0, scanDepth);
+    // Apply scan depth. recentMessages is oldest-first (buildSearchContext() uses
+    // chat.slice(-contextWindow)), so the most recent messages are at the end -
+    // slice(-scanDepth) is required to actually scan "the last N messages".
+    messagesToSearch = messagesToSearch.slice(-scanDepth);
 
     // Filter by role if needed
     if (searchIn !== 'all' && context.messageRoles) {
-        const roles = context.messageRoles.slice(0, scanDepth);
+        const roles = context.messageRoles.slice(-scanDepth);
         messagesToSearch = messagesToSearch.filter((_, idx) => {
             const role = roles[idx];
             if (searchIn === 'user') return role === 'user';
@@ -343,7 +345,10 @@ export function processChunkLinks(chunks, chunkMetadataMap, softBoost = 0.15) {
 
     // First pass: collect all hard links and soft boosts
     for (const chunk of chunks) {
-        const meta = chunkMetadataMap[chunk.hash];
+        // chunkMetadataMap is a Map keyed by String(hash), not a plain object - callers
+        // (mergeVirtualLinks, and the two Map()-built call sites in chat-vectorization.js)
+        // all construct it as a Map, so bracket access here always returned undefined.
+        const meta = chunkMetadataMap.get(String(chunk.hash));
         if (!meta?.links || meta.links.length === 0) continue;
 
         for (const link of meta.links) {

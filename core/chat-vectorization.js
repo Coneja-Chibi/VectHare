@@ -250,6 +250,26 @@ function filterSceneDisabledChunks(chunks) {
 }
 
 /**
+ * Filters out chunks the user manually disabled via the chunk visualizer's per-chunk
+ * Enabled toggle / bulk enable-disable (persisted as chunk metadata `disabled: true`,
+ * the same field chunk-groups.js already filters on).
+ * @param {object[]} chunks Chunks to filter
+ * @returns {object[]} Chunks not manually disabled
+ */
+function filterManuallyDisabledChunks(chunks) {
+    const filtered = chunks.filter(chunk => {
+        const meta = getChunkMetadata(chunk.hash);
+        return !meta?.disabled;
+    });
+
+    if (filtered.length !== chunks.length) {
+        console.log(`VectHare: Manual-disable filtering: ${chunks.length} → ${filtered.length} chunks (${chunks.length - filtered.length} manually disabled)`);
+    }
+
+    return filtered;
+}
+
+/**
  * Applies chunk-level conditions to filter results
  * @param {object[]} chunks Chunks with metadata
  * @param {object[]} chat Chat messages for context
@@ -257,8 +277,9 @@ function filterSceneDisabledChunks(chunks) {
  * @returns {Promise<object[]>} Filtered chunks
  */
 async function applyChunkConditions(chunks, chat, settings) {
-    // First filter out chunks disabled by scenes
+    // First filter out chunks disabled by scenes or manually disabled by the user
     let filtered = filterSceneDisabledChunks(chunks);
+    filtered = filterManuallyDisabledChunks(filtered);
 
     // Check if any chunks have conditions (from chunk metadata)
     const chunksWithConditions = filtered.map(chunk => {
@@ -567,10 +588,13 @@ function gatherCollectionsToQuery(settings) {
             continue;
         }
 
-        // Check if collection is enabled (use registryKey for metadata lookup)
-        if (isCollectionEnabled(registryKey)) {
-            // Push registryKey, not collectionId - activation filters need the full key for metadata
-            collectionsToQuery.push(registryKey);
+        // Check if collection is enabled. getCollectionMeta/isCollectionEnabled resolve
+        // metadata across bare-id/registry-key/legacy forms internally, so the bare
+        // collectionId works for both the enabled check and (below) the actual query -
+        // pushing the full registryKey here caused queries to be sent for an ID the
+        // vector backend never registered anything under (it strips the ':' separators).
+        if (isCollectionEnabled(collectionId)) {
+            collectionsToQuery.push(collectionId);
         }
     }
 
@@ -1964,6 +1988,7 @@ export async function vectorizeAll(settings, batchSize) {
         let iteration = 0;
         let processedCount = 0;
         let totalChunks = 0;
+        let totalFailed = 0;
 
         while (!finished) {
             if (is_send_press) {
@@ -1987,6 +2012,10 @@ export async function vectorizeAll(settings, batchSize) {
             // Update progress with actual counts
             processedCount += result.messagesProcessed;
             totalChunks += result.chunksCreated;
+            if (result.itemsFailed > 0) {
+                totalFailed += result.itemsFailed;
+                progressTracker.addError(`${result.itemsFailed} item(s) failed to embed in this batch`);
+            }
 
             progressTracker.updateProgress(
                 processedCount,
@@ -2002,9 +2031,16 @@ export async function vectorizeAll(settings, batchSize) {
             }
         }
 
-        progressTracker.complete(true, `Vectorized ${processedCount} messages (${totalChunks} chunks)`);
-        toastr.success('Chat vectorized successfully', 'VectHare');
-        console.log(`VectHare: ✅ Vectorization complete after ${iteration} iterations`);
+        if (totalFailed > 0) {
+            // Failed items are already dequeued by synchronizeChat and are not retried,
+            // so silently reporting success here would hide permanent gaps in the index.
+            progressTracker.complete(true, `Vectorized ${processedCount} messages (${totalChunks} chunks, ${totalFailed} failed)`);
+            toastr.warning(`Chat vectorized with ${totalFailed} item(s) failed - see progress panel for details`, 'VectHare');
+        } else {
+            progressTracker.complete(true, `Vectorized ${processedCount} messages (${totalChunks} chunks)`);
+            toastr.success('Chat vectorized successfully', 'VectHare');
+        }
+        console.log(`VectHare: ✅ Vectorization complete after ${iteration} iterations${totalFailed > 0 ? ` (${totalFailed} items failed)` : ''}`);
     } catch (error) {
         console.error('VectHare: Failed to vectorize all', error);
         progressTracker.addError(error.message);

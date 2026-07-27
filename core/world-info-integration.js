@@ -14,7 +14,7 @@ import { extension_settings, getContext } from '../../../../extensions.js';
 import { queryCollection } from './core-vector-api.js';
 import { getCollectionMeta, isCollectionEnabled, shouldCollectionActivate } from './collection-metadata.js';
 import { parseRegistryKey } from './collection-ids.js';
-import { buildLorebookCollectionId } from './collection-ids.js';
+import { COLLECTION_PREFIXES } from './collection-ids.js';
 import { setExtensionPrompt, getCurrentChatId } from '../../../../../script.js';
 import { EXTENSION_PROMPT_TAG } from './constants.js';
 import { buildSearchContext } from './conditional-activation.js';
@@ -193,15 +193,39 @@ function deduplicateWithActiveEntries(semanticEntries, activeEntries) {
 // ============================================================================
 
 /**
+ * Finds the actual registered collection ID for a vectorized lorebook.
+ * buildLorebookCollectionId() bakes the creation timestamp into the ID, so it can't be
+ * reconstructed later from just the lorebook name - scan the registry for an entry whose
+ * bare collection ID matches this lorebook's name prefix instead.
+ * @param {string} lorebookName - Name of the lorebook
+ * @param {object} settings - VectHare settings
+ * @returns {string|null} The bare collection ID, or null if not vectorized
+ */
+function findVectorizedLorebookCollectionId(lorebookName, settings) {
+    const sanitizedName = lorebookName
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_')
+        .substring(0, 50);
+    const prefix = `${COLLECTION_PREFIXES.VECTHARE_LOREBOOK}${sanitizedName}_`;
+
+    const registry = settings.vecthare_collection_registry || [];
+    for (const entry of registry) {
+        const bareId = parseRegistryKey(entry).collectionId || entry;
+        if (bareId.startsWith(prefix)) {
+            return bareId;
+        }
+    }
+    return null;
+}
+
+/**
  * Check if a lorebook is already vectorized
  * @param {string} lorebookName - Name of the lorebook
  * @param {object} settings - VectHare settings
  * @returns {boolean}
  */
 export function isLorebookVectorized(lorebookName, settings) {
-    const collectionId = buildLorebookCollectionId(lorebookName, 'global');
-    const collectionRegistry = settings.vecthare_collection_registry || [];
-    return collectionRegistry.includes(collectionId);
+    return findVectorizedLorebookCollectionId(lorebookName, settings) !== null;
 }
 
 /**
@@ -227,7 +251,11 @@ export function getLorebooksVectorizationStatus(lorebookNames, settings) {
  * @returns {Promise<object|null>} Stats object or null if not vectorized
  */
 export async function getLorebookVectorStats(lorebookName, settings) {
-    const collectionId = buildLorebookCollectionId(lorebookName, 'global');
+    const collectionId = findVectorizedLorebookCollectionId(lorebookName, settings);
+    if (!collectionId) {
+        return null;
+    }
+
     const meta = getCollectionMeta(collectionId);
 
     if (!meta) {

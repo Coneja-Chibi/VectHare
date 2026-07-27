@@ -207,6 +207,38 @@ function ensureCollectionsObject() {
 }
 
 /**
+ * Finds the actual extension_settings key a collection's metadata is stored
+ * under. A collection can be addressed by its bare ID, its full registry key
+ * ("backend:source:id"), or the legacy migration key ("source:id") depending
+ * on which code path wrote it - this resolves any of those forms to whatever
+ * key already holds a record for the same underlying collection, checking an
+ * exact match first. Returns null if no record exists under any equivalent
+ * key.
+ * @param {string} collectionId Collection identifier (any key form)
+ * @returns {string|null} The stored key, or null if not found
+ */
+function resolveStoredCollectionKey(collectionId) {
+    if (!collectionId || !extension_settings?.vecthare?.collections) {
+        return null;
+    }
+    const collections = extension_settings.vecthare.collections;
+
+    if (Object.prototype.hasOwnProperty.call(collections, collectionId)) {
+        return collectionId;
+    }
+
+    const targetBareId = parseRegistryKey(collectionId).collectionId || collectionId;
+    for (const key of Object.keys(collections)) {
+        const bareId = parseRegistryKey(key).collectionId || key;
+        if (bareId === targetBareId) {
+            return key;
+        }
+    }
+
+    return null;
+}
+
+/**
  * Gets metadata for a collection
  * @param {string} collectionId Collection identifier
  * @returns {object} Collection metadata (with defaults applied)
@@ -217,26 +249,8 @@ export function getCollectionMeta(collectionId) {
         return { ...defaultCollectionMeta };
     }
 
-    let stored = extension_settings.vecthare.collections[collectionId];
-
-    // Fallback: Try alternate key formats for backward compatibility
-    if (!stored && collectionId) {
-        // If looking up with full key (backend:source:id), try without backend
-        const parsed = parseRegistryKey(collectionId);
-        if (parsed.backend && parsed.source) {
-            // Try source:collectionId format
-            const legacyKey = `${parsed.source}:${parsed.collectionId}`;
-            stored = extension_settings.vecthare.collections[legacyKey];
-
-            // Try just collectionId
-            if (!stored) {
-                stored = extension_settings.vecthare.collections[parsed.collectionId];
-            }
-        } else if (parsed.source) {
-            // Already source:collectionId format, try just collectionId
-            stored = extension_settings.vecthare.collections[parsed.collectionId];
-        }
-    }
+    const key = resolveStoredCollectionKey(collectionId);
+    const stored = key ? extension_settings.vecthare.collections[key] : null;
 
     if (!stored) {
         return { ...defaultCollectionMeta };
@@ -262,16 +276,21 @@ export function setCollectionMeta(collectionId, data) {
 
     ensureCollectionsObject();
 
-    const existing = extension_settings.vecthare.collections[collectionId] || {};
+    // Write to whichever key already holds this collection's record (exact
+    // match, or an equivalent registry-key/bare-id form) so a collection's
+    // settings never end up split across two keys. Falls back to the key
+    // passed in when no record exists yet.
+    const key = resolveStoredCollectionKey(collectionId) || collectionId;
+    const existing = extension_settings.vecthare.collections[key] || {};
 
-    extension_settings.vecthare.collections[collectionId] = {
+    extension_settings.vecthare.collections[key] = {
         ...defaultCollectionMeta,
         ...existing,
         ...data,
     };
 
     saveSettingsDebounced();
-    console.log(`VectHare: Updated metadata for collection ${collectionId}`);
+    console.log(`VectHare: Updated metadata for collection ${key}`);
 }
 
 /**
@@ -281,10 +300,11 @@ export function setCollectionMeta(collectionId, data) {
 export function deleteCollectionMeta(collectionId) {
     ensureCollectionsObject();
 
-    if (extension_settings.vecthare.collections[collectionId]) {
-        delete extension_settings.vecthare.collections[collectionId];
+    const key = resolveStoredCollectionKey(collectionId);
+    if (key) {
+        delete extension_settings.vecthare.collections[key];
         saveSettingsDebounced();
-        console.log(`VectHare: Deleted metadata for collection ${collectionId}`);
+        console.log(`VectHare: Deleted metadata for collection ${key}`);
     }
 }
 
@@ -803,9 +823,11 @@ function checkTriggers(triggers, context, options = {}) {
         scanDepth = 5,
     } = options;
 
-    // Get recent message text to scan
+    // Get recent message text to scan. buildSearchContext() returns recentMessages
+    // oldest-first (index 0 = oldest of the window), so scanning from the front would
+    // look at the oldest messages in the window instead of the most recent ones.
     const recentMessages = context.recentMessages || [];
-    const messagesToScan = recentMessages.slice(0, scanDepth);
+    const messagesToScan = recentMessages.slice(-scanDepth);
     const searchText = messagesToScan.join('\n');
 
     if (!searchText) {
@@ -1127,22 +1149,27 @@ const defaultTemporalDecay = {
  */
 export function getCollectionDecaySettings(collectionId) {
     const meta = getCollectionMeta(collectionId);
+    const collectionType = meta.scope === 'chat' ? 'chat' : (meta.type || 'unknown');
+    const typeDefaults = getDefaultDecayForType(collectionType);
 
-    // If collection has explicit decay settings, use them
-    if (meta.temporalDecay) {
+    // Check the raw stored record (not the defaults-merged `meta` above) for an
+    // explicit temporalDecay override. getCollectionMeta() always fills in a full
+    // temporalDecay object from defaultCollectionMeta, so `meta.temporalDecay` is
+    // truthy even when the user never customized anything - checking it made the
+    // type-aware default path below unreachable and, because the old branch hand-
+    // copied only six fields, silently discarded `type` ('nostalgia' mode) and
+    // `maxBoost` on every read.
+    const key = resolveStoredCollectionKey(collectionId);
+    const rawStored = key ? extension_settings.vecthare?.collections?.[key] : null;
+
+    if (rawStored?.temporalDecay) {
         return {
-            enabled: meta.temporalDecay.enabled ?? false,
-            mode: meta.temporalDecay.mode || 'exponential',
-            halfLife: meta.temporalDecay.halfLife || 50,
-            linearRate: meta.temporalDecay.linearRate || 0.01,
-            minRelevance: meta.temporalDecay.minRelevance || 0.3,
-            sceneAware: meta.temporalDecay.sceneAware ?? false,
+            ...typeDefaults,
+            ...rawStored.temporalDecay,
         };
     }
 
-    // Otherwise use type-aware defaults
-    const collectionType = meta.scope === 'chat' ? 'chat' : (meta.type || 'unknown');
-    return getDefaultDecayForType(collectionType);
+    return typeDefaults;
 }
 
 /**

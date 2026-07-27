@@ -17,7 +17,6 @@ import {
     getCleaningSettings,
     saveCleaningSettings,
     addCustomPattern,
-    updateCustomPattern,
     removeCustomPattern,
     exportPatterns,
     importPatterns,
@@ -429,20 +428,33 @@ function bindEvents() {
         }
     });
 
-    // Save changes
+    // Save changes. Validate everything into a local staging object first and only
+    // touch live settings once every row passes - getCleaningSettings() returns
+    // extension_settings.vecthare.cleaning BY REFERENCE, and the previous version wrote
+    // preset/enabledBuiltins straight onto that live object and called
+    // updateCustomPattern() (which also mutates+persists the live object) per row inside
+    // the validation loop. When a later row failed validation, the loop broke and this
+    // handler returned without ever calling saveSettingsDebounced() - but the preset
+    // switch and any earlier rows' updateCustomPattern() calls were already live and
+    // already active for cleanText(), silently taking effect despite the "not saved"
+    // outcome, and would only reach disk whenever unrelated code next triggered a save.
     $('#vecthare_tcm_save').on('click', () => {
-        const settings = getCleaningSettings();
+        const liveSettings = getCleaningSettings();
+        const staging = {
+            ...liveSettings,
+            customPatterns: (liveSettings.customPatterns || []).map(p => ({ ...p })),
+        };
 
-        // Get selected preset
-        settings.selectedPreset = $('#vecthare_tcm_preset').val();
+        // Stage selected preset
+        staging.selectedPreset = $('#vecthare_tcm_preset').val();
 
-        // Get enabled built-ins
-        settings.enabledBuiltins = [];
+        // Stage enabled built-ins
+        staging.enabledBuiltins = [];
         $('#vecthare_tcm_builtin_patterns input:checked').each(function() {
-            settings.enabledBuiltins.push($(this).data('id'));
+            staging.enabledBuiltins.push($(this).data('id'));
         });
 
-        // Validate and get custom pattern updates
+        // Validate and stage custom pattern updates - nothing here touches live state
         let hasInvalidPattern = false;
         $('#vecthare_tcm_custom_patterns .vecthare-tcm-custom-item').each(function() {
             const id = $(this).data('id');
@@ -473,14 +485,18 @@ function bindEvents() {
                 replacement: $(this).find('.vecthare-tcm-custom-replacement').val(),
                 flags: parsed?.flags || 'gi',
             };
-            updateCustomPattern(id, update);
+            const index = staging.customPatterns.findIndex(p => p.id === id);
+            if (index !== -1) {
+                staging.customPatterns[index] = { ...staging.customPatterns[index], ...update };
+            }
         });
 
         if (hasInvalidPattern) {
-            return; // Don't save if there's an invalid pattern
+            return; // Don't touch live state at all if there's an invalid pattern
         }
 
-        saveCleaningSettings(settings);
+        // All rows passed - commit the fully-validated staging object in one write
+        saveCleaningSettings(staging);
         saveSettingsDebounced();
 
         toastr.success('Text cleaning settings saved', 'VectHare');
